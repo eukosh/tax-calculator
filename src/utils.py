@@ -45,6 +45,35 @@ def read_xml_to_df(file_path: str, xml_extract_func: Callable[[etree._Element], 
     return pl.concat(dfs, how="vertical")
 
 
+def read_csv_to_df(file_path: str) -> pl.DataFrame:
+    """
+    Reads CSV files into a Polars DataFrame. Supports reading multiple files matching a wildcard pattern.
+
+    Args:
+        file_path (str): Path to the CSV file or a wildcard pattern (e.g., 'folder/File*').
+
+    Returns:
+        pl.DataFrame: Combined DataFrame containing data from all matched CSV files.
+    """
+    # Find all matching files using the wildcard
+    file_paths = glob.glob(file_path)
+
+    if not file_paths:
+        raise FileNotFoundError(f"No files matched the pattern: {file_path}")
+
+    # Read and combine all CSV files into a single DataFrame
+    dfs = []
+    for path in file_paths:
+        try:
+            df = pl.read_csv(path)  # Read the CSV file into a Polars DataFrame
+            dfs.append(df)
+        except Exception as e:
+            raise ValueError(f"Failed to read CSV file at {path}: {e}")
+
+    # Concatenate all DataFrames vertically (union)
+    return pl.concat(dfs, how="vertical")
+
+
 def join_exchange_rates(df: pl.DataFrame, rates_df: pl.DataFrame, df_date_col: str) -> pl.DataFrame:
     if "currency" not in df.columns:
         raise ValueError("df is missing a 'currency' column.")

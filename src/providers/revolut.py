@@ -7,6 +7,9 @@ from src.utils import calculate_kest, convert_to_euro, join_exchange_rates
 
 
 def process_revolut_savings_statement(csv_file_path: str, exchange_rates_df: pl.DataFrame) -> pl.DataFrame:
+    logging.info(
+        "In the current implementation it is not ready to properly process from euro and usd accounts combined."
+    )
     print("\n\n======================== Processing Revolut Savings Statement ========================\n")
 
     # Convert the extracted data into Polars DataFrames
@@ -61,6 +64,7 @@ def process_revolut_savings_statement(csv_file_path: str, exchange_rates_df: pl.
     tax_df = calculate_kest(profit_euro_df, amount_col=Column.profit_euro)
     print(tax_df)
 
+    # once i update this func to process both usd and euro accounts, i will need to add a group by currency here or deal only with euro amounts
     summary_df = tax_df.select(
         pl.sum(Column.profit).alias(Column.profit_total),
         pl.sum(Column.profit_euro).alias(Column.profit_euro_total),

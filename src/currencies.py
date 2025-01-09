@@ -65,7 +65,7 @@ class ExchangeRates:
                 pl.col("CURRENCY").alias("currency"),
                 pl.col("CURRENCY_DENOM").alias("currency_denom"),
                 pl.col("OBS_VALUE").alias("exchange_rate"),
-                pl.col("TITLE").alias("description"),
+                # pl.col("TITLE").alias("description"),
             ]
         )
         return filtered_df

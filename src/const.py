@@ -13,7 +13,11 @@ class TransactionTypeIBKR(StrEnum):
 
 
 class Column(StrEnum):
+    amount = auto()
+    amount_euro = auto()
+    amount_euro_received_total = auto()
     date = auto()
+    type = auto()
     kest_gross = auto()
     kest_gross_total = auto()
     kest_net = auto()
@@ -25,6 +29,9 @@ class Column(StrEnum):
     profit_euro_total = auto()
     profit_euro_net = auto()
     profit_euro_net_total = auto()
+    withholding_tax = auto()
+    withholding_tax_euro = auto()
+    withholding_tax_euro_total = auto()
 
 
 class RevolutColumn(StrEnum):

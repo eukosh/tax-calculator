@@ -1,7 +1,7 @@
 import polars as pl
 from polars.testing.asserts import assert_frame_equal
 
-from src.ibkr import calculate_kest
+from src.providers.ibkr import calculate_kest
 
 
 def test_calculate_kest():

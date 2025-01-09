@@ -98,8 +98,11 @@ def process_cash_transactions_ibkr(
     joined_df = convert_to_euro(joined_df, col_to_convert="amount")
 
     pivoted_df = apply_pivot(joined_df)
-    pivoted_df = calculate_kest(pivoted_df, amount_col="dividends_euro", tax_withheld_col="withholding_tax")
-
+    print(pivoted_df)
+    # previously it used withholding_tax instead of withholding_tax_euro, verify if it is correct now
+    pivoted_df = calculate_kest(pivoted_df, amount_col="dividends_euro", tax_withheld_col="withholding_tax_euro")
+    print(pivoted_df)
+    # raise ValueError("Stop here")
     country_agg_df = (
         pivoted_df.group_by("issuer_country_code")
         .agg(
