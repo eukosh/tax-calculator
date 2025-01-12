@@ -1,6 +1,7 @@
 import glob
+import json
 import logging
-from typing import Callable
+from typing import Callable, Sequence, Union
 
 import polars as pl
 from lxml import etree
@@ -11,6 +12,12 @@ from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, KEST_RATE, MAX_DTT_
 # Helper function to extract elements into a list of dictionaries
 def extract_elements(parent, tag):
     return [{key: element.get(key) for key in element.keys()} for element in parent.findall(tag)]
+
+
+def read_json(path: str) -> dict:
+    with open(path, "r") as f:
+        json_data = json.load(f)
+    return json_data
 
 
 def read_xml_to_df(file_path: str, xml_extract_func: Callable[[etree._Element], list[dict]]) -> pl.DataFrame:
@@ -128,14 +135,21 @@ def join_exchange_rates(df: pl.DataFrame, rates_df: pl.DataFrame, df_date_col: s
     return joined_df
 
 
-def convert_to_euro(df: pl.DataFrame, col_to_convert: str) -> pl.DataFrame:
-    return df.with_columns(
+def convert_to_euro(df: pl.DataFrame, col_to_convert: Union[str, Sequence[str]]) -> pl.DataFrame:
+    # Ensure col_to_convert is a list, even if a single string is provided
+    if isinstance(col_to_convert, str):
+        col_to_convert = [col_to_convert]
+
+    cols_conversion_expr = [
         (
             pl.when(pl.col("currency") != CurrencyCode.euro)
-            .then(pl.col(col_to_convert) / pl.col("exchange_rate"))
-            .otherwise(pl.col(col_to_convert))
-        ).alias(f"{col_to_convert}_euro")
-    )
+            .then(pl.col(col) / pl.col("exchange_rate"))
+            .otherwise(pl.col(col))
+        ).alias(f"{col}_euro")
+        for col in col_to_convert
+    ]
+
+    return df.with_columns(cols_conversion_expr)
 
 
 def calculate_kest(df: pl.DataFrame, amount_col: str, tax_withheld_col: str = None) -> pl.DataFrame:

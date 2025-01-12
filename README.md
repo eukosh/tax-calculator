@@ -1,1 +1,1 @@
-A Python tool to calculate Austrian tax on capital gains based on reports from IBKR, Freedom Finance, Revolut, Wise
+A Python tool to calculate Austrian tax on capital gains based on reports from Interactive Brokers, Freedom Finance, Revolut and Wise.

@@ -12,10 +12,18 @@ class TransactionTypeIBKR(StrEnum):
     pil = "Payment In Lieu Of Dividends"
 
 
+class CorporateActionTypesFF(StrEnum):
+    dividend = auto()
+    dividend_reverted = auto()
+
+
 class Column(StrEnum):
     amount = auto()
     amount_euro = auto()
+    amount_euro_net = auto()
     amount_euro_received_total = auto()
+    corporate_action_id = auto()
+    ticker = auto()
     date = auto()
     type = auto()
     kest_gross = auto()
@@ -32,6 +40,8 @@ class Column(StrEnum):
     withholding_tax = auto()
     withholding_tax_euro = auto()
     withholding_tax_euro_total = auto()
+    shares_count = auto()
+    amount_per_share = auto()
 
 
 class RevolutColumn(StrEnum):
