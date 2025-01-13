@@ -29,16 +29,17 @@ def process_revolut_savings_statement(csv_file_path: str, exchange_rates_df: pl.
                 .otherwise(None)
                 .alias(RevolutColumn.type)
             ),
-            pl.when(pl.col("Value").str.contains("$"))
-            .then(pl.lit(CurrencyCode.usd))
-            .when(pl.col("Value").str.contains("€"))
-            .then(pl.lit(CurrencyCode.euro))
-            .otherwise(None)
-            .alias(Column.currency),
+            (
+                pl.when(pl.col("Value").str.contains("$", literal=True))
+                .then(pl.lit(CurrencyCode.usd))
+                .when(pl.col("Value").str.contains("€", literal=True))
+                .then(pl.lit(CurrencyCode.euro))
+                .otherwise(None)
+                .alias(Column.currency)
+            ),
             pl.col("Value")
             .str.replace("$", "", literal=True)
-            .str.replace("$", "", literal=True)
-            .str.replace("$", "", literal=True)
+            .str.replace("€", "", literal=True)
             .str.replace(",", "", literal=True)
             .cast(pl.Float64)
             .alias(RevolutColumn.amount),
