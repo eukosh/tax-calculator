@@ -1,4 +1,3 @@
-
 import glob
 import json
 import logging
@@ -7,7 +6,7 @@ from typing import Callable, Sequence, Union
 import polars as pl
 from lxml import etree
 
-from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, KEST_RATE, MAX_DTT_RATE, CurrencyCode
+from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, KEST_RATE, MAX_DTT_RATE, Column, CurrencyCode
 
 
 # Helper function to extract elements into a list of dictionaries
@@ -83,32 +82,35 @@ def read_csv_to_df(file_path: str) -> pl.DataFrame:
 
 
 def join_exchange_rates(df: pl.DataFrame, rates_df: pl.DataFrame, df_date_col: str) -> pl.DataFrame:
-    if "currency" not in df.columns:
+    if Column.currency not in df.columns:
         raise ValueError("df is missing a 'currency' column.")
-    if "currency" not in rates_df.columns:
-        raise ValueError("rates_df is missing a 'currency' column.")
+
+    rates_df_required_cols = {Column.currency, Column.rate_date, Column.exchange_rate}
+    rates_df_missing_cols = rates_df_required_cols - set(rates_df.columns)
+    if rates_df_missing_cols != set():
+        raise ValueError(f"rates_df is missing the following required columns: {rates_df_missing_cols}")
 
     # order here is important for join_asof
-    rates_df = rates_df.sort(["currency", "rate_date"])
-    df = df.sort(["currency", df_date_col])
+    rates_df = rates_df.sort([Column.currency, Column.rate_date])
+    df = df.sort([Column.currency, df_date_col])
 
     joined_df = df.join_asof(
         rates_df,
         left_on=df_date_col,
-        right_on="rate_date",
-        by="currency",
+        right_on=Column.rate_date,
+        by=Column.currency,
         strategy="backward",  # Fallback to the previous available date
     )
 
     # make sure it works when no conversion is needed
     unmatched_dates_df = joined_df.filter(
-        (pl.col("rate_date") != pl.col(df_date_col)) & (pl.col("currency") != CurrencyCode.euro)
+        (pl.col(Column.rate_date) != pl.col(df_date_col)) & (pl.col(Column.currency) != CurrencyCode.euro)
     )
     if unmatched_dates_df.shape[0] > 0:
         logging.warning(f"\nSome dates did not match, it might be okay, but double check:\n{unmatched_dates_df}")
 
         mismatches_in_acceptable_range_df = unmatched_dates_df.filter(
-            pl.col("rate_date").is_between(
+            pl.col(Column.rate_date).is_between(
                 pl.col(df_date_col).dt.offset_by(f"-{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET}d"),
                 pl.col(df_date_col).dt.offset_by(f"{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET}d"),
             )
@@ -144,7 +146,7 @@ def convert_to_euro(df: pl.DataFrame, col_to_convert: Union[str, Sequence[str]])
     cols_conversion_expr = [
         (
             pl.when(pl.col("currency") != CurrencyCode.euro)
-            .then(pl.col(col) / pl.col("exchange_rate"))
+            .then(pl.col(col) / pl.col(Column.exchange_rate))
             .otherwise(pl.col(col))
         ).alias(f"{col}_euro")
         for col in col_to_convert

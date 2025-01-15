@@ -42,6 +42,7 @@ class Column(StrEnum):
     withholding_tax_euro_total = auto()
     shares_count = auto()
     amount_per_share = auto()
+    rate_date = auto()
 
 
 class RevolutColumn(StrEnum):
