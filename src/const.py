@@ -43,6 +43,7 @@ class Column(StrEnum):
     shares_count = auto()
     amount_per_share = auto()
     rate_date = auto()
+    exchange_rate = auto()
 
 
 class RevolutColumn(StrEnum):

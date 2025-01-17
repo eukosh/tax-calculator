@@ -90,6 +90,15 @@ def join_exchange_rates(df: pl.DataFrame, rates_df: pl.DataFrame, df_date_col: s
     if rates_df_missing_cols != set():
         raise ValueError(f"rates_df is missing the following required columns: {rates_df_missing_cols}")
 
+    # Ensure the all required currencies are present in rates_df
+    df_currencies = set(df[Column.currency].unique().to_list())
+    rates_df_currencies = set(rates_df[Column.currency].unique().to_list())
+    rates_df_currencies.add(CurrencyCode.euro)  # We are converting to Euro thus we can assume its there
+
+    rates_df_missing_currencies = df_currencies.difference(rates_df_currencies)
+    if rates_df_missing_currencies:
+        raise ValueError(f"rates_df is missing the following currencies: {rates_df_missing_currencies}")
+
     # order here is important for join_asof
     rates_df = rates_df.sort([Column.currency, Column.rate_date])
     df = df.sort([Column.currency, df_date_col])
@@ -129,8 +138,9 @@ def join_exchange_rates(df: pl.DataFrame, rates_df: pl.DataFrame, df_date_col: s
             )
 
             logging.error(
-                "Unfortunatelly, a few dates are outside of the acceptable range of +-{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET} days:\n",
-                unacceptable_date_mismatch,
+                "Unfortunatelly, a few dates are outside of the acceptable range of +-{} days:\n{}".format(
+                    EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, unacceptable_date_mismatch
+                ),
             )
 
             raise ValueError("Some dates did not match. See the logs above.")
