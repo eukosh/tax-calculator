@@ -45,6 +45,8 @@ class Column(StrEnum):
     amount_per_share = auto()
     rate_date = auto()
     exchange_rate = auto()
+    dividends = auto()
+    dividends_euro = auto()
 
 
 class RevolutColumn(StrEnum):
