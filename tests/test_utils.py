@@ -5,7 +5,7 @@ import pytest
 from polars.testing.asserts import assert_frame_equal
 
 from src.const import Column
-from src.utils import calculate_kest, extract_elements, join_exchange_rates, read_xml_to_df
+from src.utils import calculate_kest, convert_to_euro, extract_elements, join_exchange_rates, read_xml_to_df
 
 dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 6), date(2024, 1, 10), date(2024, 1, 10)]
 dividend_currencies = ["USD", "USD", "USD", "GBP", "EUR"]
@@ -188,5 +188,49 @@ def test_join_exchange_rates(dividends_euro_df, exhange_rates_df):
             Column.exchange_rate: [1.03, 1.02, 1.1, 1.4, None],
         }
     ).sort(Column.date, Column.currency)
+
+    assert_frame_equal(expected_df, res_df)
+
+
+@pytest.mark.parametrize(
+    "col_to_convert,converted_cols",
+    [
+        (
+            Column.amount,
+            {Column.amount_euro: [97.0874, 117.6471, 400.0, 392.1569]},
+        ),
+        (
+            [Column.amount, Column.withholding_tax],
+            {
+                Column.amount_euro: [97.0874, 117.6471, 400.0, 392.1569],
+                Column.withholding_tax_euro: [1.9417, 1.1765, 10.0, 19.6078],
+            },
+        ),
+    ],
+)
+def test_convert_to_euro(col_to_convert, converted_cols: dict):
+    currencies = ["USD", "GBP", "EUR", "USD"]
+    amounts = [100.0, 100.0, 400.0, 400.0]
+    tax = [2.0, 1.0, 10.0, 20.0]
+    rates = [1.03, 0.85, None, 1.02]
+    df = pl.DataFrame(
+        {
+            Column.currency: currencies,
+            Column.amount: amounts,
+            Column.withholding_tax: tax,
+            Column.exchange_rate: rates,
+        }
+    )
+
+    expected_df = pl.DataFrame(
+        {
+            Column.currency: currencies,
+            Column.amount: amounts,
+            Column.withholding_tax: tax,
+            Column.exchange_rate: rates,
+            **converted_cols,
+        }
+    )
+    res_df = convert_to_euro(df, col_to_convert)
 
     assert_frame_equal(expected_df, res_df)

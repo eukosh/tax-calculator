@@ -6,7 +6,14 @@ from typing import Callable, Sequence, Union
 import polars as pl
 from lxml import etree
 
-from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, KEST_RATE, MAX_DTT_RATE, Column, CurrencyCode
+from src.const import (
+    EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET,
+    FLOAT_PRECISION,
+    KEST_RATE,
+    MAX_DTT_RATE,
+    Column,
+    CurrencyCode,
+)
 
 
 # Helper function to extract elements into a list of dictionaries
@@ -155,8 +162,8 @@ def convert_to_euro(df: pl.DataFrame, col_to_convert: Union[str, Sequence[str]])
 
     cols_conversion_expr = [
         (
-            pl.when(pl.col("currency") != CurrencyCode.euro)
-            .then(pl.col(col) / pl.col(Column.exchange_rate))
+            pl.when(pl.col(Column.currency) != CurrencyCode.euro)
+            .then((pl.col(col) / pl.col(Column.exchange_rate)).round(FLOAT_PRECISION))
             .otherwise(pl.col(col))
         ).alias(f"{col}_euro")
         for col in col_to_convert

@@ -3,6 +3,7 @@ from enum import StrEnum, auto
 KEST_RATE = 0.275
 MAX_DTT_RATE = 0.15  # Maximum double taxation treaty rate
 EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET = 7  # days
+FLOAT_PRECISION = 4
 
 
 class TransactionTypeIBKR(StrEnum):
