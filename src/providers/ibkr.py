@@ -3,9 +3,7 @@ from datetime import date
 
 import polars as pl
 
-from src.const import (
-    TransactionTypeIBKR,
-)
+from src.const import FLOAT_PRECISION, Column, TransactionTypeIBKR
 from src.utils import calculate_kest, convert_to_euro, extract_elements, join_exchange_rates, read_xml_to_df
 
 logging.basicConfig(
@@ -54,7 +52,7 @@ def apply_pivot(df: pl.DataFrame) -> pl.DataFrame:
 def process_cash_transactions_ibkr(
     xml_file_path: str, exchange_rates_df: pl.DataFrame, start_date: date, end_date: date
 ) -> pl.DataFrame:
-    print("\n\n======================== Processing Cash Transactions ========================\n")
+    logging.info("\n\n======================== Processing Cash Transactions ========================\n")
     cash_transactions_df = read_xml_to_df(
         file_path=xml_file_path,
         xml_extract_func=lambda root: extract_elements(root.find(".//CashTransactions"), "CashTransaction"),
@@ -94,27 +92,27 @@ def process_cash_transactions_ibkr(
         rates_df=exchange_rates_df,
         df_date_col="settle_date",
     )
-    # print("joined", joined_df.filter(pl.col("settle_date") == date(2023, 9, 15)))
+
     joined_df = convert_to_euro(joined_df, col_to_convert="amount")
 
     pivoted_df = apply_pivot(joined_df)
-    print(pivoted_df)
-    # previously it used withholding_tax instead of withholding_tax_euro, verify if it is correct now
+    logging.debug("\nPivoted DataFrame:\n {}".format(pivoted_df))
+
     pivoted_df = calculate_kest(pivoted_df, amount_col="dividends_euro", tax_withheld_col="withholding_tax_euro")
-    print(pivoted_df)
-    # raise ValueError("Stop here")
+    logging.debug("\nPivoted with KeST DataFrame:\n {}".format(pivoted_df))
+
     country_agg_df = (
         pivoted_df.group_by("issuer_country_code")
         .agg(
-            pl.sum("dividends_euro").alias("dividends_euro_total"),
-            pl.sum("dividends_euro_net").alias("dividends_euro_net_total"),
-            pl.sum("withholding_tax_euro").alias("withholding_tax_euro_total"),
-            pl.sum("kest_gross").alias("kest_gross_total"),
-            pl.sum("kest_net").alias("kest_net_total"),
+            pl.sum("dividends_euro").round(FLOAT_PRECISION).alias(Column.dividends_euro_total),
+            pl.sum("dividends_euro_net").round(FLOAT_PRECISION).alias(Column.dividends_euro_net_total),
+            pl.sum("withholding_tax_euro").round(FLOAT_PRECISION).alias("withholding_tax_euro_total"),
+            pl.sum("kest_gross").round(FLOAT_PRECISION).alias("kest_gross_total"),
+            pl.sum("kest_net").round(FLOAT_PRECISION).alias("kest_net_total"),
         )
         .sort("dividends_euro_total", descending=True)
     )
-    print(country_agg_df)
+    logging.info("Dividends by Country:\n{}".format(country_agg_df))
 
     return country_agg_df
 
@@ -122,7 +120,7 @@ def process_cash_transactions_ibkr(
 def process_bonds_ibkr(
     xml_file_path: str, exchange_rates_df: pl.DataFrame, start_date: date, end_date: date
 ) -> [pl.DataFrame, pl.DataFrame]:
-    print("\n\n======================== Processing Corporate Actions ========================\n")
+    logging.info("\n\n======================== Processing Corporate Actions ========================\n")
 
     # Convert the extracted data into Polars DataFrames
     corporate_actions_df = read_xml_to_df(
@@ -163,18 +161,18 @@ def process_bonds_ibkr(
         "realized_pnl_euro_net",
         "kest_gross",
         "kest_net",
-    ).sort("report_date", "isin")
+    ).sort("realized_pnl", "isin", descending=True)
     logging.info(tax_df)
 
     country_agg_df = (
         tax_df.group_by("issuer_country_code")
         .agg(
-            pl.sum("realized_pnl_euro").alias("realized_pnl_euro_total"),
-            pl.sum("realized_pnl_euro_net").alias("realized_pnl_euro_net_total"),
-            pl.sum("kest_gross").alias("kest_gross_total"),
-            pl.sum("kest_net").alias("kest_net_total"),
+            pl.sum("realized_pnl_euro").round(FLOAT_PRECISION).alias(Column.profit_euro_total),
+            pl.sum("realized_pnl_euro_net").round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
+            pl.sum("kest_gross").round(FLOAT_PRECISION).alias(Column.kest_gross_total),
+            pl.sum("kest_net").round(FLOAT_PRECISION).alias(Column.kest_net_total),
         )
-        .sort("realized_pnl_euro_total", descending=True)
+        .sort(Column.profit_euro_total, descending=True)
     )
     logging.info(country_agg_df)
 
@@ -184,20 +182,20 @@ def process_bonds_ibkr(
 def calculate_summary_ibkr(dividends_df: pl.DataFrame, bonds_df: pl.DataFrame) -> pl.DataFrame:
     dividends_summary_df = dividends_df.select(
         pl.lit("dividends").alias("type"),
-        pl.col("dividends_euro_total").sum().alias("realized_pnl_euro_total"),
-        pl.col("dividends_euro_net_total").sum().alias("realized_pnl_euro_net_total"),
-        pl.col("withholding_tax_euro_total").sum().alias("withholding_tax_euro_total"),
-        pl.col("kest_gross_total").sum().alias("kest_gross_total"),
-        pl.col("kest_net_total").sum().alias("kest_net_total"),
+        pl.col("dividends_euro_total").sum().alias(Column.profit_euro_total),
+        pl.col("dividends_euro_net_total").sum().alias(Column.profit_euro_net_total),
+        pl.col("withholding_tax_euro_total").sum().alias(Column.withholding_tax_euro_total),
+        pl.col("kest_gross_total").sum().alias(Column.kest_gross_total),
+        pl.col("kest_net_total").sum().alias(Column.kest_net_total),
     )
 
     bonds_summary_df = bonds_df.select(
         pl.lit("bonds").alias("type"),
-        pl.col("realized_pnl_euro_total").sum().alias("realized_pnl_euro_total"),
-        pl.col("realized_pnl_euro_net_total").sum().alias("realized_pnl_euro_net_total"),
-        pl.lit(0.0).alias("withholding_tax_euro_total"),
-        pl.col("kest_gross_total").sum().alias("kest_gross_total"),
-        pl.col("kest_net_total").sum().alias("kest_net_total"),
+        pl.col(Column.profit_euro_total).sum().alias(Column.profit_euro_total),
+        pl.col(Column.profit_euro_net_total).sum().alias(Column.profit_euro_net_total),
+        pl.lit(0.0).alias(Column.withholding_tax_euro_total),
+        pl.col(Column.kest_gross_total).sum().alias(Column.kest_gross_total),
+        pl.col(Column.kest_net_total).sum().alias(Column.kest_net_total),
     )
 
     return pl.concat([dividends_summary_df, bonds_summary_df], how="vertical_relaxed")

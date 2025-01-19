@@ -1,5 +1,6 @@
 # https://data.ecb.europa.eu/help/api/data
 # https://www.oenb.at/isawebstat/stabfrage/createReport?lang=EN&original=false&report=2.14.9
+import logging
 import os
 
 import polars as pl
@@ -26,7 +27,7 @@ class ExchangeRates:
         if overwrite or not os.path.exists(raw_file_path):
             self._fetch_and_store_exchange_rates()
         else:
-            print("Loading exchange rates from file...")
+            logging.info("Loading exchange rates from file...")
             self._load_from_file()
 
     def _fetch_and_store_exchange_rates(self):
@@ -36,7 +37,7 @@ class ExchangeRates:
             "endPeriod": self.end_date,
             "format": "csvdata",
         }
-        print(f"Fetching exchange rates from {url}")
+        logging.info(f"Fetching exchange rates from {url}")
         # Fetch data from API
         response = requests.get(url, params=params)
 
@@ -48,7 +49,7 @@ class ExchangeRates:
 
             # Load into memory and filter
             self.df = self._load_and_filter(self.raw_file_path)
-            print("Exchange rates loaded.")
+            logging.info("Exchange rates loaded.")
         else:
             raise Exception(f"Failed to fetch data. HTTP Status Code: {response.status_code}")
 

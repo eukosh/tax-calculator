@@ -141,7 +141,6 @@ def test_join_exchange_rates_unmatched_record_error(dividend_date, dividends_eur
     """
     Test that join_exchange_rates raises a ValueError when some dates do not match.
     """
-    print(f"Dividend date: {dividend_date}")
     dividends_euro_df = dividends_euro_df.vstack(
         pl.DataFrame(
             {
