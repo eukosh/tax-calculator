@@ -5,7 +5,6 @@ import pytest
 from polars.testing.asserts import assert_frame_equal
 
 from src.const import Column
-from src.currencies import ExchangeRates
 from src.providers.ibkr import apply_pivot, calculate_summary_ibkr, process_bonds_ibkr, process_cash_transactions_ibkr
 
 REPORTING_START_DATE = date(2024, 1, 1)
@@ -49,16 +48,6 @@ def sample_df_with_duplicates():
             "amount_euro": [90.0, 9.0, 18.0, 1.8],
         }
     )
-
-
-@pytest.fixture
-def rates_df():
-    exchange_rates = ExchangeRates(
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        raw_file_path="tests/test_data/currencies/exchange_rates.csv",
-    )
-    return exchange_rates.get_rates()
 
 
 @pytest.fixture

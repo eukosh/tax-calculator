@@ -63,7 +63,10 @@ if __name__ == "__main__":
 
     # ------- Revolut
     revolut_summary_df = process_revolut_savings_statement(
-        "data/input/oryna/revolut/savings_statement_2024_12_08_2024_12_31.csv", rates_df
+        "data/input/oryna/revolut/savings_statement_2024_12_08_2024_12_31.csv",
+        rates_df,
+        start_date=reporting_start_date,
+        end_date=reporting_end_date,
     )
     revolut_writer = PolarsWriter(
         output_dir=f"data/output/{person}/revolut",
