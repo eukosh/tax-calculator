@@ -76,7 +76,12 @@ if __name__ == "__main__":
     revolut_writer.write_csv(revolut_summary_df, "revolut_tax_summary.csv")
 
     # ------- Wise
-    wise_summary_df = process_wise_statement(f"data/input/{person}/wise/wise*", rates_df)
+    wise_summary_df = process_wise_statement(
+        f"data/input/{person}/wise/wise*",
+        rates_df,
+        start_date=reporting_start_date,
+        end_date=reporting_end_date,
+    )
     wise_writer = PolarsWriter(
         output_dir=f"data/output/{person}/wise",
         report_start_date=reporting_start_date,

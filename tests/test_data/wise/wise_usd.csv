@@ -1,0 +1,7 @@
+"TransferWise ID",Date,Amount,Currency,Description,"Payment Reference","Running Balance","Exchange From","Exchange To","Exchange Rate","Payer Name","Payee Name","Payee Account Number",Merchant,"Card Last Four Digits","Card Holder Full Name",Attachment,Note,"Total fees","Exchange To Amount"
+"BALANCE_CASHBACK-4e1c1925-1897-4a5b-e204-9c890e7d8fe5",03-12-2024,3.00,USD,"Balance cashback",,1741.33,,,,,,,,,,,,0.00,
+"BALANCE_CASHBACK-3fa06917-888b-4431-efd8-a4b164a561c8",06-06-2024,3.93,USD,"Balance cashback",,1720.14,,,,,,,,,,,,0.00,
+"BALANCE_CASHBACK-3cfb0195-a72b-452f-dd5c-d99c92384cb7",08-05-2024,3.79,USD,"Balance cashback",,1716.21,,,,,,,,,,,,0.00,
+TRANSFER-123123123,01-06-2024,480.00,USD,"Topped up balance",,3995.35,,,,,,,,,,,,2.26,
+"BALANCE_CASHBACK-4e1c1925-1897-4a5b-e204-9c890e7d8fe5",03-12-2023,3.00,USD,"Balance cashback",,1741.33,,,,,,,,,,,,0.00,
+"BALANCE_CASHBACK-4e1c1925-1897-4a5b-e204-9c890e7d8fe5",03-12-2025,3.00,USD,"Balance cashback",,1741.33,,,,,,,,,,,,0.00,

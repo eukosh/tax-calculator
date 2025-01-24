@@ -172,7 +172,9 @@ def convert_to_euro(df: pl.DataFrame, col_to_convert: Union[str, Sequence[str]])
     return df.with_columns(cols_conversion_expr)
 
 
-def calculate_kest(df: pl.DataFrame, amount_col: str, tax_withheld_col: str = None) -> pl.DataFrame:
+def calculate_kest(
+    df: pl.DataFrame, amount_col: str, tax_withheld_col: str = None, net_col_name: str = None
+) -> pl.DataFrame:
     # Net Austrian KESt=Austrian KESt on Gross amount − min(Foreign Withholding Tax,Treaty Rate × Gross Dividends)
     # keep in mind that witholding tax is negative number, it causes error in formula
     kest_gross = pl.col(amount_col) * KEST_RATE
@@ -193,5 +195,5 @@ def calculate_kest(df: pl.DataFrame, amount_col: str, tax_withheld_col: str = No
     if tax_withheld_col:
         amount_net = amount_net - pl.col(tax_withheld_col)
     return df.with_columns(
-        amount_net.alias(f"{amount_col}_net"),
+        amount_net.alias(net_col_name or f"{amount_col}_net"),
     )
