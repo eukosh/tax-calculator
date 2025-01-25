@@ -1,8 +1,9 @@
 import logging
+from datetime import date
 
 import polars as pl
 
-from src.const import Column, CorporateActionTypesFF
+from src.const import FLOAT_PRECISION, Column, CorporateActionTypesFF
 from src.utils import calculate_kest, convert_to_euro, join_exchange_rates, read_json
 
 EMPTY_VALUE = "-"
@@ -10,7 +11,9 @@ EMPTY_VALUE = "-"
 TICKERS_WITHHOLDING_ZERO_TAX = ["TLT.US"]
 
 
-def process_freedom_statement(json_file_path: str, exchange_rates_df: pl.DataFrame) -> pl.DataFrame:
+def process_freedom_statement(
+    json_file_path: str, exchange_rates_df: pl.DataFrame, start_date: date, end_date: date
+) -> pl.DataFrame:
     print("\n\n======================== Processing Freedom Finance Statement ========================\n")
 
     statement = read_json(json_file_path)
@@ -35,7 +38,7 @@ def process_freedom_statement(json_file_path: str, exchange_rates_df: pl.DataFra
         pl.col("tax_amount").str.replace(f"^{EMPTY_VALUE}$", "0").cast(pl.Float64).alias(Column.withholding_tax),
         pl.col("q_on_ex_date").cast(pl.Float64).alias(Column.shares_count),
         pl.col("amount_per_one").cast(pl.Float64).alias(Column.amount_per_share),
-    )
+    ).filter(pl.col(Column.date).is_between(start_date, end_date))
 
     dividends_df = corporate_actions_df.filter(pl.col(Column.type) == CorporateActionTypesFF.dividend)
     dividends_reverted_df = corporate_actions_df.filter(pl.col(Column.type) == CorporateActionTypesFF.dividend_reverted)
@@ -69,9 +72,9 @@ def process_freedom_statement(json_file_path: str, exchange_rates_df: pl.DataFra
     )
     if incorrect_withholding_tax_df.shape[0] > 0:
         logging.warning("Incorrect withholding tax for some tickers: {}".format(incorrect_withholding_tax_df))
-        incorrect_withholding_tax_df.write_csv(
-            "data/input/eugene/freedom/dividends_with_incorrect_non_0_withholding_tax.csv"
-        )
+        # incorrect_withholding_tax_df.write_csv(
+        #     "data/input/eugene/freedom/dividends_with_incorrect_non_0_withholding_tax.csv"
+        # )
 
     dividends_tax_abs_df = dividends_df.with_columns(pl.col(Column.withholding_tax).abs().alias(Column.withholding_tax))
     # 1. calculate gross amount by summing withholding tax to amount
@@ -108,11 +111,11 @@ def process_freedom_statement(json_file_path: str, exchange_rates_df: pl.DataFra
         )
     )
     summary_df = tax_df.select(
-        pl.sum(Column.amount).alias(Column.profit_total),
-        pl.sum(Column.amount_euro).alias(Column.profit_euro_total),
+        pl.sum(Column.amount).round(FLOAT_PRECISION).alias(Column.profit_total),
+        pl.sum(Column.amount_euro).round(FLOAT_PRECISION).alias(Column.profit_euro_total),
         pl.sum(Column.amount_euro_net).alias(Column.profit_euro_net_total),
-        pl.sum(Column.kest_gross).alias(Column.kest_gross_total),
-        pl.sum(Column.kest_net).alias(Column.kest_net_total),
+        pl.sum(Column.kest_gross).round(FLOAT_PRECISION).alias(Column.kest_gross_total),
+        pl.sum(Column.kest_net).round(FLOAT_PRECISION).alias(Column.kest_net_total),
     )
 
     logging.info("Freedom Finance Summary: {}".format(summary_df))
