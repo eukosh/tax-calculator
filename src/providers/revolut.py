@@ -47,7 +47,7 @@ def process_revolut_savings_statement(
             .alias(RevolutColumn.amount),
         ]
     ).filter(pl.col(Column.date).is_between(start_date, end_date))
-    logging.debug("\nProcessed Statemend Df:\n", processed_statement_df)
+    logging.debug("\nProcessed Statemend Df: %s\n", processed_statement_df)
 
     fees_interest_df = processed_statement_df.filter(
         pl.col(RevolutColumn.type).is_in([RevolutType.fee, RevolutType.interest])
@@ -57,7 +57,7 @@ def process_revolut_savings_statement(
     profit_by_date_df = fees_interest_df.group_by(Column.date, Column.currency).agg(
         pl.sum(RevolutColumn.amount).alias(Column.profit)
     )
-    logging.debug("\nprofit_by_date_df:\n", profit_by_date_df)
+    logging.debug("\nprofit_by_date_df:  %s\n", profit_by_date_df)
 
     joined_df = join_exchange_rates(
         df=profit_by_date_df,
@@ -65,10 +65,10 @@ def process_revolut_savings_statement(
         df_date_col=Column.date,
     )
     profit_euro_df = convert_to_euro(joined_df, Column.profit)
-    logging.debug("\nprofit_euro_df:\n", profit_euro_df)
+    logging.debug("\nprofit_euro_df: %s\n", profit_euro_df)
 
     tax_df = calculate_kest(profit_euro_df, amount_col=Column.profit_euro)
-    logging.debug("\tax_df:\n", tax_df)
+    logging.debug("\ntax_df:  %s\n", tax_df)
 
     # once i update this func to process both usd and euro accounts, i will need to add a group by currency here or deal only with euro amounts
     summary_df = tax_df.select(
@@ -76,6 +76,7 @@ def process_revolut_savings_statement(
         pl.sum(Column.profit).round(FLOAT_PRECISION).alias(Column.profit_total),
         pl.sum(Column.profit_euro).round(FLOAT_PRECISION).alias(Column.profit_euro_total),
         pl.sum(Column.profit_euro_net).round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
+        pl.lit(0.0).alias(Column.withholding_tax_euro_total),
         pl.sum(Column.kest_gross).round(FLOAT_PRECISION).alias(Column.kest_gross_total),
         pl.sum(Column.kest_net).round(FLOAT_PRECISION).alias(Column.kest_net_total),
     ).sort(Column.profit_euro_total, descending=True)

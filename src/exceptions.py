@@ -1,0 +1,2 @@
+class MissingColumnException(Exception):
+    pass

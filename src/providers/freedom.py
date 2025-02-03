@@ -101,7 +101,7 @@ def process_freedom_statement(
     tax_df = calculate_kest(joined_df, amount_col=Column.amount_euro, tax_withheld_col=Column.withholding_tax_euro)
     logging.info(
         "FF dividends per ticker: {}".format(
-            tax_df.group_by(Column.ticker).agg(
+            tax_df.group_by(Column.ticker, Column.currency).agg(
                 pl.sum(Column.amount).alias(Column.profit_total),
                 pl.sum(Column.amount_euro).alias(Column.profit_euro_total),
                 pl.sum(Column.amount_euro_net).alias(Column.profit_euro_net_total),
@@ -110,10 +110,11 @@ def process_freedom_statement(
             )
         )
     )
-    summary_df = tax_df.select(
+    summary_df = tax_df.group_by(Column.currency).agg(
         pl.sum(Column.amount).round(FLOAT_PRECISION).alias(Column.profit_total),
         pl.sum(Column.amount_euro).round(FLOAT_PRECISION).alias(Column.profit_euro_total),
         pl.sum(Column.amount_euro_net).alias(Column.profit_euro_net_total),
+        pl.sum(Column.withholding_tax_euro).alias(Column.withholding_tax_euro_total),
         pl.sum(Column.kest_gross).round(FLOAT_PRECISION).alias(Column.kest_gross_total),
         pl.sum(Column.kest_net).round(FLOAT_PRECISION).alias(Column.kest_net_total),
     )

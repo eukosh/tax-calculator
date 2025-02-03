@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import StrEnum, auto
 
 KEST_RATE = 0.275
@@ -70,3 +71,35 @@ class RevolutType(StrEnum):
     buy = "buy"
     interest = "interest"
     fee = "fee"
+
+
+@dataclass
+class ColumnRepr:
+    name: str
+    description: str
+
+
+COL_REPR_MAP = {
+    Column.currency: ColumnRepr(name="Currency", description="Initial currency of the security."),
+    Column.type: ColumnRepr(
+        name="Type",
+        description="Type of the security that generated the profit, e.g. bonds, dividends, etc.",
+    ),
+    Column.profit_total: ColumnRepr(name="Profit in Currency", description="Total profit in the initial currency."),
+    Column.profit_euro_total: ColumnRepr(name="Gross Profit", description="Total GROSS profit in EUR."),
+    Column.profit_euro_net_total: ColumnRepr(
+        name="Net Profit",
+        description="Total approximate NET profit in EUR, it accounts for withholding tax and Austrian tax that is to be paid.",
+    ),
+    Column.withholding_tax_euro_total: ColumnRepr(
+        name="Withholding Tax", description="Total tax withheld at the source in EUR."
+    ),
+    Column.kest_gross_total: ColumnRepr(
+        name="Gross KESt",
+        description="Total Gross Austrian tax (KESt) in EUR. It does not account for double taxation treaty and the tax withheld at the source.",
+    ),
+    Column.kest_net_total: ColumnRepr(
+        name="Net KESt",
+        description="Total Net Austrian tax (KESt) in EUR. It accounts for the tax withheld at the source and DTT. Essentially it should be an amount that needs to be paid as a tax in Austria.",
+    ),
+}

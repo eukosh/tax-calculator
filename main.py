@@ -4,6 +4,7 @@ from datetime import date
 import polars as pl
 
 from src.currencies import ExchangeRates
+from src.pdf.tax_report import ReportSection, create_tax_report
 from src.providers.freedom import process_freedom_statement
 from src.providers.ibkr import calculate_summary_ibkr, process_bonds_ibkr, process_cash_transactions_ibkr
 from src.providers.revolut import process_revolut_savings_statement
@@ -11,15 +12,15 @@ from src.providers.wise import process_wise_statement
 from src.writer import PolarsWriter
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(levelname)s: %(message)s\n",
 )
 
 # Path to your XML file
 xml_file = "data/input/For_tax_automation*"
 
-person = "oryna"
-# person = "eugene"
+# person = "oryna"
+person = "eugene"
 
 if __name__ == "__main__":
     pl.Config.set_tbl_rows(100)
@@ -32,6 +33,7 @@ if __name__ == "__main__":
     exchange_rates = ExchangeRates(start_date="2024-01-01", end_date="2024-12-31")
     rates_df = exchange_rates.get_rates()
 
+    report_sections: list[ReportSection] = []
     if person == "eugene":
         # ------- IBKR
         dividends_country_agg_df = process_cash_transactions_ibkr(
@@ -60,10 +62,12 @@ if __name__ == "__main__":
 
         summary_ibkr_df = calculate_summary_ibkr(dividends_country_agg_df, bonds_tax_country_agg_df)
         ibkr_writer.write_csv(summary_ibkr_df, "ibkr_summary.csv")
-
+        report_sections.append(ReportSection("IBKR", summary_ibkr_df))
     # ------- Revolut
     revolut_summary_df = process_revolut_savings_statement(
-        "data/input/oryna/revolut/savings_statement_2024_12_08_2024_12_31.csv",
+        "data/input/oryna/revolut/savings_statement_2024_12_08_2024_12_31.csv"
+        if person == "oryna"
+        else "data/input/eugene/revolut/savings-statement_2024-10-07_2024-12-31.csv",
         rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
@@ -74,24 +78,32 @@ if __name__ == "__main__":
         report_end_date=reporting_end_date,
     )
     revolut_writer.write_csv(revolut_summary_df, "revolut_tax_summary.csv")
+    report_sections.append(ReportSection("Revolut", revolut_summary_df))
+    if person == "oryna":
+        # ------- Wise
+        wise_summary_df = process_wise_statement(
+            f"data/input/{person}/wise/wise*",
+            rates_df,
+            start_date=reporting_start_date,
+            end_date=reporting_end_date,
+        )
+        wise_writer = PolarsWriter(
+            output_dir=f"data/output/{person}/wise",
+            report_start_date=reporting_start_date,
+            report_end_date=reporting_end_date,
+        )
 
-    # ------- Wise
-    wise_summary_df = process_wise_statement(
-        f"data/input/{person}/wise/wise*",
-        rates_df,
-        start_date=reporting_start_date,
-        end_date=reporting_end_date,
-    )
-    wise_writer = PolarsWriter(
-        output_dir=f"data/output/{person}/wise",
-        report_start_date=reporting_start_date,
-        report_end_date=reporting_end_date,
-    )
-    wise_writer.write_csv(wise_summary_df, "wise_tax_summary.csv")
+        wise_writer.write_csv(wise_summary_df, "wise_tax_summary.csv")
+        report_sections.append(ReportSection("Wise", wise_summary_df))
 
     # ------- Freedom Finance
     freedom_summary_df = process_freedom_statement(
-        "data/input/oryna/freedom/ff_oryna_2024-10-05 23_59_59_2024-12-31 23_59_59_all.json", rates_df
+        "data/input/oryna/freedom/ff_oryna_2024-10-05 23_59_59_2024-12-31 23_59_59_all.json"
+        if person == "oryna"
+        else "data/input/eugene/freedom/freedom_2024-04-30 23_59_59_2024-12-31 23_59_59_all.json",
+        rates_df,
+        start_date=reporting_start_date,
+        end_date=reporting_end_date,
     )
     ff_writer = PolarsWriter(
         output_dir=f"data/output/{person}/freedom",
@@ -99,3 +111,10 @@ if __name__ == "__main__":
         report_end_date=reporting_end_date,
     )
     ff_writer.write_csv(freedom_summary_df, "freedom_tax_summary.csv")
+    report_sections.append(ReportSection("Freedom Finance", freedom_summary_df))
+
+    create_tax_report(
+        report_sections,
+        output_path=f"data/output/tax_report_{person}.pdf",
+        title=f"Tax Report - {person.capitalize()}",
+    )
