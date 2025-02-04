@@ -91,6 +91,8 @@ def bonds_country_summary_df():
     return pl.DataFrame(
         {
             "issuer_country_code": ["US"],
+            Column.currency: ["USD"],
+            Column.profit_total: [381.08],
             Column.profit_euro_total: [356.6176],
             Column.profit_euro_net_total: [258.5478],
             Column.kest_gross_total: [98.0698],
@@ -104,6 +106,8 @@ def dividends_country_summary_df():
     return pl.DataFrame(
         {
             "issuer_country_code": ["US", "GB"],
+            Column.currency: ["USD", "USD"],
+            Column.profit_total: [15.73, 2.38],
             Column.dividends_euro_total: [14.3017, 2.2493],
             Column.dividends_euro_net_total: [10.3642, 1.6307],
             Column.withholding_tax_euro_total: [2.1456, 0],
@@ -190,6 +194,8 @@ def test_calculate_summary_ibkr(dividends_country_summary_df, bonds_country_summ
     expected_df = pl.DataFrame(
         {
             Column.type: ["dividends", "bonds"],
+            Column.currency: ["USD", "USD"],
+            Column.profit_total: [18.11, 381.08],
             Column.profit_euro_total: [16.551, 356.6176],
             Column.profit_euro_net_total: [11.9949, 258.5478],
             Column.withholding_tax_euro_total: [2.1456, 0],

@@ -22,9 +22,11 @@ def test_process_freedom_statement(rates_df):
 
     expected_df = pl.DataFrame(
         {
+            Column.currency: ["USD"],
             Column.profit_total: [3400.0],
             Column.profit_euro_total: [3111.3477],
             Column.profit_euro_net_total: [2255.7271],
+            Column.withholding_tax_euro_total: [410.7862],
             Column.kest_gross_total: [855.6206],
             Column.kest_net_total: [444.8344],
         }

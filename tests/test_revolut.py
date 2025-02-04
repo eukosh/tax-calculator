@@ -24,6 +24,7 @@ def test_process_revolut_savings_statement_usd(rates_df):
             Column.profit_total: [0.66],
             Column.profit_euro_total: [0.6314],
             Column.profit_euro_net_total: [0.4578],
+            Column.withholding_tax_euro_total: [0.0],
             Column.kest_gross_total: [0.1736],
             Column.kest_net_total: [0.1736],
         }
@@ -46,6 +47,7 @@ def test_process_revolut_savings_statement_euro(rates_df):
             Column.profit_total: [0.54],
             Column.profit_euro_total: [0.54],
             Column.profit_euro_net_total: [0.3915],
+            Column.withholding_tax_euro_total: [0.0],
             Column.kest_gross_total: [0.1485],
             Column.kest_net_total: [0.1485],
         }

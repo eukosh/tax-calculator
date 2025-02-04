@@ -60,13 +60,18 @@ def process_wise_statement(
 
     # it is possible to add a group by currency step before calcualting combined summary, to have a summary for each currency just for curiosity
 
-    summary_df = tax_df.select(
-        # pl.sum(Column.amount_euro).round(FLOAT_PRECISION).alias(Column.amount_euro_received_total),
-        pl.sum(Column.profit_gross_euro).round(FLOAT_PRECISION).alias(Column.profit_gross_euro_total),
-        pl.sum(Column.withholding_tax_euro).round(FLOAT_PRECISION).alias(Column.withholding_tax_euro_total),
-        pl.sum(Column.profit_euro_net).round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
-        pl.sum(Column.kest_gross).round(FLOAT_PRECISION).alias(Column.kest_gross_total),
-        pl.sum(Column.kest_net).round(FLOAT_PRECISION).alias(Column.kest_net_total),
-    ).sort(Column.profit_gross_euro_total, descending=True)
+    summary_df = (
+        tax_df.group_by(Column.currency)
+        .agg(
+            # pl.sum(Column.amount_euro).round(FLOAT_PRECISION).alias(Column.amount_euro_received_total),
+            pl.sum(Column.profit_gross).round(FLOAT_PRECISION).alias(Column.profit_total),
+            pl.sum(Column.profit_gross_euro).round(FLOAT_PRECISION).alias(Column.profit_gross_euro_total),
+            pl.sum(Column.withholding_tax_euro).round(FLOAT_PRECISION).alias(Column.withholding_tax_euro_total),
+            pl.sum(Column.profit_euro_net).round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
+            pl.sum(Column.kest_gross).round(FLOAT_PRECISION).alias(Column.kest_gross_total),
+            pl.sum(Column.kest_net).round(FLOAT_PRECISION).alias(Column.kest_net_total),
+        )
+        .sort(Column.profit_gross_euro_total, descending=True)
+    )
 
     return summary_df

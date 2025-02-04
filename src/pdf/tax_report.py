@@ -62,7 +62,6 @@ def add_summary_stats_from_df(current_stats: SummarySection, df: pl.DataFrame) -
     return current_stats
 
 
-# TODO: Fix tests
 def create_tax_report(sections: List[ReportSection], output_path: str, title: str = "Tax Report"):
     pdf = SimpleDocTemplate(
         output_path, pagesize=A4, leftMargin=1 * cm, rightMargin=0.5 * cm, topMargin=1 * cm, bottomMargin=0.5 * cm
