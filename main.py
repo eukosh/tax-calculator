@@ -19,8 +19,8 @@ logging.basicConfig(
 # Path to your XML file
 xml_file = "data/input/For_tax_automation*"
 
-# person = "oryna"
-person = "eugene"
+person = "oryna"
+# person = "eugene"
 
 if __name__ == "__main__":
     pl.Config.set_tbl_rows(100)
@@ -117,4 +117,6 @@ if __name__ == "__main__":
         report_sections,
         output_path=f"data/output/tax_report_{person}.pdf",
         title=f"Tax Report - {person.capitalize()}",
+        start_date=reporting_start_date,
+        end_date=reporting_end_date,
     )

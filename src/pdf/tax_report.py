@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import date
 from typing import List, TypedDict
 
 import polars as pl
@@ -31,7 +32,7 @@ class ReportSection:
 def create_table_from_df(df: pl.DataFrame):
     columns = [COL_REPR_MAP.get(col).name for col in df.columns]
     table_data = [columns] + df.to_numpy().tolist()
-    print(table_data)
+
     table = Table(table_data)
     table.hAlign = "LEFT"
 
@@ -62,12 +63,19 @@ def add_summary_stats_from_df(current_stats: SummarySection, df: pl.DataFrame) -
     return current_stats
 
 
-def create_tax_report(sections: List[ReportSection], output_path: str, title: str = "Tax Report"):
+def create_tax_report(
+    sections: List[ReportSection], output_path: str, start_date: date, end_date: date, title: str = "Tax Report"
+):
     pdf = SimpleDocTemplate(
         output_path, pagesize=A4, leftMargin=1 * cm, rightMargin=0.5 * cm, topMargin=1 * cm, bottomMargin=0.5 * cm
     )
-
-    elements = [Paragraph(title, styles["Title"])]
+    space = Spacer(1, 12)
+    elements = [
+        Paragraph(title, styles["Title"]),
+        space,
+        Paragraph(f"Reporting period: <b>{start_date}</b> to <b>{end_date}</b>", styles["Normal"]),
+        space,
+    ]
     total_stats: SummarySection = {
         Column.profit_euro_total: 0,
         Column.profit_euro_net_total: 0,
@@ -79,7 +87,7 @@ def create_tax_report(sections: List[ReportSection], output_path: str, title: st
     for section in sections:
         elements.append(Paragraph(section.title, styles["Heading1"]))
         elements.append(create_table_from_df(section.df))
-        elements.append(Spacer(1, 12))
+        elements.append(space)
 
         total_stats = add_summary_stats_from_df(total_stats, section.df)
         for col in section.df.columns:
