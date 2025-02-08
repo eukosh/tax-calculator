@@ -53,6 +53,7 @@ class Column(StrEnum):
     withholding_tax = auto()
     withholding_tax_euro = auto()
     withholding_tax_euro_total = auto()
+    issuer_country_code = auto()
 
 
 class RevolutColumn(StrEnum):
@@ -101,5 +102,9 @@ COL_REPR_MAP = {
     Column.kest_net_total: ColumnRepr(
         name="Net KESt",
         description="Total Net Austrian tax (KESt) in EUR. It accounts for the tax withheld at the source and DTT. Essentially it should be an amount that needs to be paid as a tax in Austria.",
+    ),
+    Column.issuer_country_code: ColumnRepr(
+        name="Issuer Country",
+        description="Country code of the issuer of the security.",
     ),
 }

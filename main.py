@@ -19,8 +19,8 @@ logging.basicConfig(
 # Path to your XML file
 xml_file = "data/input/For_tax_automation*"
 
-person = "oryna"
-# person = "eugene"
+# person = "oryna"
+person = "eugene"
 
 if __name__ == "__main__":
     pl.Config.set_tbl_rows(100)
@@ -36,11 +36,12 @@ if __name__ == "__main__":
     report_sections: list[ReportSection] = []
     if person == "eugene":
         # ------- IBKR
-        dividends_country_agg_df = process_cash_transactions_ibkr(
+        dividends_country_agg_df, reit_divs_agg_df = process_cash_transactions_ibkr(
             xml_file_path=xml_file,
             exchange_rates_df=rates_df,
             start_date=reporting_start_date,
             end_date=reporting_end_date,
+            calc_reits_separately=True,
         )
 
         bonds_tax_df, bonds_tax_country_agg_df = process_bonds_ibkr(
@@ -60,7 +61,7 @@ if __name__ == "__main__":
         ibkr_writer.write_csv(bonds_tax_df, "bonds_tax_df.csv")
         ibkr_writer.write_csv(bonds_tax_country_agg_df, "bonds_tax_country_agg_df.csv")
 
-        summary_ibkr_df = calculate_summary_ibkr(dividends_country_agg_df, bonds_tax_country_agg_df)
+        summary_ibkr_df = calculate_summary_ibkr(dividends_country_agg_df, bonds_tax_country_agg_df, reit_divs_agg_df)
         ibkr_writer.write_csv(summary_ibkr_df, "ibkr_summary.csv")
         report_sections.append(ReportSection("IBKR", summary_ibkr_df))
     # ------- Revolut
@@ -120,3 +121,5 @@ if __name__ == "__main__":
         start_date=reporting_start_date,
         end_date=reporting_end_date,
     )
+
+# TODO: fix tests and cover separte reit calculations

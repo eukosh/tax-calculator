@@ -108,6 +108,6 @@ def create_tax_report(
         )
     )
     elements.append(Spacer(1, 12))
-    elements.append(Paragraph("Legend", styles["Heading1"]))
+    elements.append(Paragraph("Glossary", styles["Heading1"]))
     elements.append(ListFlowable(legend_items.values(), bulletType="bullet"))
     pdf.build(elements)

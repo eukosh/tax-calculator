@@ -12,6 +12,7 @@ def apply_pivot(df: pl.DataFrame) -> pl.DataFrame:
     index_keys = [
         "settle_date",
         "issuer_country_code",
+        "sub_category",
         "symbol",
         "currency",
     ]
@@ -44,23 +45,46 @@ def apply_pivot(df: pl.DataFrame) -> pl.DataFrame:
     return pivoted_df
 
 
+def agg_final_transactions(df: pl.DataFrame) -> pl.DataFrame:
+    return (
+        df.group_by("issuer_country_code", Column.currency)
+        .agg(
+            pl.sum("dividends").round(FLOAT_PRECISION).alias(Column.profit_total),
+            pl.sum("dividends_euro").round(FLOAT_PRECISION).alias(Column.dividends_euro_total),
+            pl.sum("dividends_euro_net").round(FLOAT_PRECISION).alias(Column.dividends_euro_net_total),
+            pl.sum("withholding_tax_euro").round(FLOAT_PRECISION).alias("withholding_tax_euro_total"),
+            pl.sum("kest_gross").round(FLOAT_PRECISION).alias("kest_gross_total"),
+            pl.sum("kest_net").round(FLOAT_PRECISION).alias("kest_net_total"),
+        )
+        .sort("dividends_euro_total", descending=True)
+    )
+
+
 def process_cash_transactions_ibkr(
-    xml_file_path: str, exchange_rates_df: pl.DataFrame, start_date: date, end_date: date
-) -> pl.DataFrame:
+    xml_file_path: str,
+    exchange_rates_df: pl.DataFrame,
+    start_date: date,
+    end_date: date,
+    calc_reits_separately: bool = False,
+) -> (pl.DataFrame, pl.DataFrame | None):
     logging.info("\n\n======================== Processing Cash Transactions ========================\n")
     cash_transactions_df = read_xml_to_df(
         file_path=xml_file_path,
         xml_extract_func=lambda root: extract_elements(root.find(".//CashTransactions"), "CashTransaction"),
     )
 
-    cash_transactions_df = cash_transactions_df.with_columns(
-        pl.when(pl.col("type") == TransactionTypeIBKR.tax)
-        .then(pl.col("amount").cast(pl.Float64).abs())
-        .otherwise(pl.col("amount").cast(pl.Float64))
-        .alias("amount"),
-        pl.col("issuerCountryCode").alias("issuer_country_code"),
-        pl.col("settleDate").str.strptime(pl.Date, "%Y-%m-%d").alias("settle_date"),
-    ).filter(pl.col("settle_date").is_between(start_date, end_date))
+    cash_transactions_df = (
+        cash_transactions_df.rename({"subCategory": "sub_category"})
+        .with_columns(
+            pl.when(pl.col("type") == TransactionTypeIBKR.tax)
+            .then(pl.col("amount").cast(pl.Float64).abs())
+            .otherwise(pl.col("amount").cast(pl.Float64))
+            .alias("amount"),
+            pl.col("issuerCountryCode").alias("issuer_country_code"),
+            pl.col("settleDate").str.strptime(pl.Date, "%Y-%m-%d").alias("settle_date"),
+        )
+        .filter(pl.col("settle_date").is_between(start_date, end_date))
+    )
 
     types = cash_transactions_df["type"].unique().to_list()
     logging.info(f"Transaction Types: {types}")
@@ -71,6 +95,7 @@ def process_cash_transactions_ibkr(
     cash_transactions_df = cash_transactions_df.select(
         [
             "symbol",
+            "sub_category",
             "currency",
             pl.when(pl.col("type") == TransactionTypeIBKR.pil)
             .then(pl.lit(TransactionTypeIBKR.dividend))
@@ -96,21 +121,18 @@ def process_cash_transactions_ibkr(
     pivoted_df = calculate_kest(pivoted_df, amount_col="dividends_euro", tax_withheld_col="withholding_tax_euro")
     logging.debug("\nPivoted with KeST DataFrame:\n {}".format(pivoted_df))
 
-    country_agg_df = (
-        pivoted_df.group_by("issuer_country_code", Column.currency)
-        .agg(
-            pl.sum("dividends").round(FLOAT_PRECISION).alias(Column.profit_total),
-            pl.sum("dividends_euro").round(FLOAT_PRECISION).alias(Column.dividends_euro_total),
-            pl.sum("dividends_euro_net").round(FLOAT_PRECISION).alias(Column.dividends_euro_net_total),
-            pl.sum("withholding_tax_euro").round(FLOAT_PRECISION).alias("withholding_tax_euro_total"),
-            pl.sum("kest_gross").round(FLOAT_PRECISION).alias("kest_gross_total"),
-            pl.sum("kest_net").round(FLOAT_PRECISION).alias("kest_net_total"),
-        )
-        .sort("dividends_euro_total", descending=True)
-    )
+    reit_agg_df = None
+    if calc_reits_separately:
+        reit_df = pivoted_df.filter(pl.col("sub_category") == "REIT")
+        pivoted_df = pivoted_df.filter(pl.col("sub_category") != "REIT")
+
+        reit_agg_df = agg_final_transactions(reit_df)
+        logging.info("Dividends from REITs:\n{}".format(reit_agg_df))
+
+    country_agg_df = agg_final_transactions(pivoted_df)
     logging.info("Dividends by Country:\n{}".format(country_agg_df))
 
-    return country_agg_df
+    return country_agg_df, reit_agg_df
 
 
 def process_bonds_ibkr(
@@ -176,7 +198,9 @@ def process_bonds_ibkr(
     return tax_df, country_agg_df
 
 
-def calculate_summary_ibkr(dividends_df: pl.DataFrame, bonds_df: pl.DataFrame) -> pl.DataFrame:
+def calculate_summary_ibkr(
+    dividends_df: pl.DataFrame, bonds_df: pl.DataFrame, reits_df: pl.DataFrame = None
+) -> pl.DataFrame:
     dividends_summary_df = dividends_df.group_by(pl.lit("dividends").alias("type"), Column.currency).agg(
         pl.col(Column.profit_total).sum().round(FLOAT_PRECISION).alias(Column.profit_total),
         pl.col("dividends_euro_total").sum().round(FLOAT_PRECISION).alias(Column.profit_euro_total),
@@ -194,5 +218,15 @@ def calculate_summary_ibkr(dividends_df: pl.DataFrame, bonds_df: pl.DataFrame) -
         pl.col(Column.kest_gross_total).sum().round(FLOAT_PRECISION).alias(Column.kest_gross_total),
         pl.col(Column.kest_net_total).sum().round(FLOAT_PRECISION).alias(Column.kest_net_total),
     )
-
-    return pl.concat([dividends_summary_df, bonds_summary_df], how="vertical_relaxed")
+    merge_dfs = [dividends_summary_df, bonds_summary_df]
+    if reits_df is not None:
+        reits_summary_df = reits_df.group_by(pl.lit("REIT dividends").alias("type"), Column.currency).agg(
+            pl.col(Column.profit_total).sum().round(FLOAT_PRECISION).alias(Column.profit_total),
+            pl.col("dividends_euro_total").sum().round(FLOAT_PRECISION).alias(Column.profit_euro_total),
+            pl.col("dividends_euro_net_total").sum().round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
+            pl.col("withholding_tax_euro_total").sum().round(FLOAT_PRECISION).alias(Column.withholding_tax_euro_total),
+            pl.col("kest_gross_total").sum().round(FLOAT_PRECISION).alias(Column.kest_gross_total),
+            pl.col("kest_net_total").sum().round(FLOAT_PRECISION).alias(Column.kest_net_total),
+        )
+        merge_dfs.append(reits_summary_df)
+    return pl.concat(merge_dfs, how="vertical_relaxed")
