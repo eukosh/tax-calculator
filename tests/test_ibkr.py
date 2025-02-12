@@ -23,6 +23,7 @@ def sample_df_no_duplicates():
         {
             "settle_date": ["2025-01-01", "2025-01-01", "2025-01-02"],
             "issuer_country_code": ["USA", "USA", "UK"],
+            "sub_category": ["common", "common", "common"],
             "symbol": ["AAPL", "AAPL", "UL"],
             "currency": ["USD", "USD", "USD"],
             "type": ["Dividends", "Withholding Tax", "Dividends"],
@@ -41,6 +42,7 @@ def sample_df_with_duplicates():
         {
             "settle_date": ["2025-01-01", "2025-01-01", "2025-01-01", "2025-01-01"],
             "issuer_country_code": ["USA", "USA", "USA", "USA"],
+            "sub_category": ["common", "common", "common", "common"],
             "symbol": ["AAPL", "AAPL", "AAPL", "AAPL"],
             "currency": ["USD", "USD", "USD", "USD"],
             "type": ["Dividends", "Dividends", "Withholding Tax", "Withholding Tax"],
@@ -102,7 +104,39 @@ def bonds_country_summary_df():
 
 
 @pytest.fixture
+def dividends_reits_summary_df():
+    return pl.DataFrame(
+        {
+            "issuer_country_code": ["US"],
+            Column.currency: ["USD"],
+            Column.profit_total: [5.53],
+            Column.dividends_euro_total: [5.072],
+            Column.dividends_euro_net_total: [3.6767],
+            Column.withholding_tax_euro_total: [0.7613],
+            Column.kest_gross_total: [1.3948],
+            Column.kest_net_total: [0.634],
+        }
+    )
+
+
+@pytest.fixture
 def dividends_country_summary_df():
+    return pl.DataFrame(
+        {
+            "issuer_country_code": ["US", "GB"],
+            Column.currency: ["USD", "USD"],
+            Column.profit_total: [21.26, 2.38],
+            Column.dividends_euro_total: [19.3737, 2.2493],
+            Column.dividends_euro_net_total: [14.0409, 1.6307],
+            Column.withholding_tax_euro_total: [2.9069, 0],
+            Column.kest_gross_total: [5.3278, 0.6186],
+            Column.kest_net_total: [2.4259, 0.6186],
+        }
+    )
+
+
+@pytest.fixture
+def dividends_country_summary_no_reits_df():
     return pl.DataFrame(
         {
             "issuer_country_code": ["US", "GB"],
@@ -127,6 +161,7 @@ def test_apply_pivot_no_duplicates(sample_df_no_duplicates, caplog):
         {
             "settle_date": ["2025-01-01", "2025-01-02"],
             "issuer_country_code": ["USA", "UK"],
+            "sub_category": ["common", "common"],
             "symbol": ["AAPL", "UL"],
             "currency": ["USD", "USD"],
             Column.dividends: [100.0, 100.0],
@@ -150,6 +185,7 @@ def test_apply_pivot_with_duplicates(sample_df_with_duplicates, caplog):
         {
             "settle_date": ["2025-01-01"],
             "issuer_country_code": ["USA"],
+            "sub_category": ["common"],
             "symbol": ["AAPL"],
             "currency": ["USD"],
             Column.dividends: [110.0],
@@ -163,15 +199,31 @@ def test_apply_pivot_with_duplicates(sample_df_with_duplicates, caplog):
     assert_frame_equal(res_df, expected_df)
 
 
-def test_process_cash_transactions_ibkr(rates_df, dividends_country_summary_df):
-    res_df = process_cash_transactions_ibkr(
+@pytest.mark.parametrize(
+    "calculate_reits_separtely",
+    [True, False],
+)
+def test_process_cash_transactions_ibkr(
+    rates_df,
+    dividends_country_summary_df,
+    calculate_reits_separtely,
+    dividends_country_summary_no_reits_df,
+    dividends_reits_summary_df,
+):
+    res_df, reits_df = process_cash_transactions_ibkr(
         "tests/test_data/ibkr/For_tax_automation*",
         rates_df,
         start_date=REPORTING_START_DATE,
         end_date=REPORTING_END_DATE,
+        calc_reits_separately=calculate_reits_separtely,
     )
-
-    assert_frame_equal(res_df, dividends_country_summary_df)
+    if calculate_reits_separtely:
+        assert_frame_equal(reits_df, dividends_reits_summary_df)
+    else:
+        assert reits_df is None
+    assert_frame_equal(
+        res_df, dividends_country_summary_no_reits_df if calculate_reits_separtely else dividends_country_summary_df
+    )
 
 
 def test_process_bonds_ibkr(rates_df, bonds_tax_df, bonds_country_summary_df):
@@ -195,12 +247,36 @@ def test_calculate_summary_ibkr(dividends_country_summary_df, bonds_country_summ
         {
             Column.type: ["dividends", "bonds"],
             Column.currency: ["USD", "USD"],
-            Column.profit_total: [18.11, 381.08],
-            Column.profit_euro_total: [16.551, 356.6176],
-            Column.profit_euro_net_total: [11.9949, 258.5478],
-            Column.withholding_tax_euro_total: [2.1456, 0],
-            Column.kest_gross_total: [4.5516, 98.0698],
-            Column.kest_net_total: [2.4105, 98.0698],
+            Column.profit_total: [23.64, 381.08],
+            Column.profit_euro_total: [21.623, 356.6176],
+            Column.profit_euro_net_total: [15.6716, 258.5478],
+            Column.withholding_tax_euro_total: [2.9069, 0],
+            Column.kest_gross_total: [5.9464, 98.0698],
+            Column.kest_net_total: [3.0445, 98.0698],
+        }
+    )
+
+    assert_frame_equal(ibkr_summary_df, expected_df)
+
+
+def test_calculate_summary_separate_reits_ibkr(
+    dividends_country_summary_df, bonds_country_summary_df, dividends_reits_summary_df
+):
+    ibkr_summary_df = calculate_summary_ibkr(
+        dividends_df=dividends_country_summary_df,
+        bonds_df=bonds_country_summary_df,
+        reits_df=dividends_reits_summary_df,
+    )
+    expected_df = pl.DataFrame(
+        {
+            Column.type: ["dividends", "bonds", "REIT dividends"],
+            Column.currency: ["USD", "USD", "USD"],
+            Column.profit_total: [23.64, 381.08, 5.53],
+            Column.profit_euro_total: [21.623, 356.6176, 5.072],
+            Column.profit_euro_net_total: [15.6716, 258.5478, 3.6767],
+            Column.withholding_tax_euro_total: [2.9069, 0, 0.7613],
+            Column.kest_gross_total: [5.9464, 98.0698, 1.3948],
+            Column.kest_net_total: [3.0445, 98.0698, 0.634],
         }
     )
 

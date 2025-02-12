@@ -122,4 +122,3 @@ if __name__ == "__main__":
         end_date=reporting_end_date,
     )
 
-# TODO: fix tests and cover separte reit calculations
