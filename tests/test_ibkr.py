@@ -5,7 +5,13 @@ import pytest
 from polars.testing.asserts import assert_frame_equal
 
 from src.const import Column
-from src.providers.ibkr import apply_pivot, calculate_summary_ibkr, process_bonds_ibkr, process_cash_transactions_ibkr
+from src.providers.ibkr import (
+    apply_pivot,
+    calculate_summary_ibkr,
+    handle_dividend_adjustments,
+    process_bonds_ibkr,
+    process_cash_transactions_ibkr,
+)
 
 REPORTING_START_DATE = date(2024, 1, 1)
 REPORTING_END_DATE = date(2024, 12, 31)
@@ -104,17 +110,17 @@ def bonds_country_summary_df():
 
 
 @pytest.fixture
-def dividends_reits_summary_df():
+def dividends_etf_reit_summary_df():
     return pl.DataFrame(
         {
-            "issuer_country_code": ["US"],
-            Column.currency: ["USD"],
-            Column.profit_total: [5.53],
-            Column.dividends_euro_total: [5.072],
-            Column.dividends_euro_net_total: [3.6767],
-            Column.withholding_tax_euro_total: [0.7613],
-            Column.kest_gross_total: [1.3948],
-            Column.kest_net_total: [0.634],
+            "issuer_country_code": ["IE", "US"],
+            Column.currency: ["USD", "USD"],
+            Column.profit_total: [41.53, 9.88],
+            Column.dividends_euro_total: [39.7987, 9.0617],
+            Column.dividends_euro_net_total: [28.8541, 6.5692],
+            Column.withholding_tax_euro_total: [0.0, 1.2015],
+            Column.kest_gross_total: [10.9446, 2.492],
+            Column.kest_net_total: [10.9446, 1.291],
         }
     )
 
@@ -123,32 +129,65 @@ def dividends_reits_summary_df():
 def dividends_country_summary_df():
     return pl.DataFrame(
         {
-            "issuer_country_code": ["US", "GB"],
-            Column.currency: ["USD", "USD"],
-            Column.profit_total: [21.26, 2.38],
-            Column.dividends_euro_total: [19.3737, 2.2493],
-            Column.dividends_euro_net_total: [14.0409, 1.6307],
-            Column.withholding_tax_euro_total: [2.9069, 0],
-            Column.kest_gross_total: [5.3278, 0.6186],
-            Column.kest_net_total: [2.4259, 0.6186],
+            "issuer_country_code": ["IE", "US", "NL", "GB"],
+            Column.currency: ["USD", "USD", "EUR", "USD"],
+            Column.profit_total: [41.53, 25.61, 7.6, 2.38],
+            Column.dividends_euro_total: [39.7988, 23.3634, 7.6, 2.2493],
+            Column.dividends_euro_net_total: [28.8541, 16.9335, 5.51, 1.6307],
+            Column.withholding_tax_euro_total: [0.0, 3.3471, 1.14, 0],
+            Column.kest_gross_total: [10.9446, 6.4249, 2.09, 0.6186],
+            Column.kest_net_total: [10.9446, 3.0828, 0.95, 0.6186],
         }
     )
 
 
 @pytest.fixture
-def dividends_country_summary_no_reits_df():
+def dividends_country_summary_no_etf_reit_df():
     return pl.DataFrame(
         {
-            "issuer_country_code": ["US", "GB"],
-            Column.currency: ["USD", "USD"],
-            Column.profit_total: [15.73, 2.38],
-            Column.dividends_euro_total: [14.3017, 2.2493],
-            Column.dividends_euro_net_total: [10.3642, 1.6307],
-            Column.withholding_tax_euro_total: [2.1456, 0],
-            Column.kest_gross_total: [3.933, 0.6186],
-            Column.kest_net_total: [1.7919, 0.6186],
+            "issuer_country_code": ["US", "NL", "GB"],
+            Column.currency: ["USD", "EUR", "USD"],
+            Column.profit_total: [15.73, 7.6, 2.38],
+            Column.dividends_euro_total: [14.3017, 7.6, 2.2493],
+            Column.dividends_euro_net_total: [10.3642, 5.51, 1.6307],
+            Column.withholding_tax_euro_total: [2.1456, 1.14, 0],
+            Column.kest_gross_total: [3.933, 2.09, 0.6186],
+            Column.kest_net_total: [1.7919, 0.95, 0.6186],
         }
     )
+
+
+def test_handle_dividend_adjustments():
+    # Sample input data simulating dividend and withholding tax adjustments
+    data = {
+        "action_id": [1, 1, 1, 1],
+        "settle_date": ["2024-10-15", "2024-10-15", "2024-10-15", "2024-10-15"],
+        "issuer_country_code": ["US", "US", "US", "US"],
+        "sub_category": ["REIT", "REIT", "REIT", "REIT"],
+        "symbol": ["CTRE", "CTRE", "CTRE", "CTRE"],
+        "currency": ["USD", "USD", "USD", "USD"],
+        "type": ["Dividends", "Withholding Tax", "Withholding Tax", "Withholding Tax"],
+        "amount": [4.35, -0.65, 0.65, -0.48],
+    }
+
+    df = pl.DataFrame(data)
+
+    expected_data = {
+        "action_id": [1, 1],
+        "settle_date": ["2024-10-15", "2024-10-15"],
+        "issuer_country_code": ["US", "US"],
+        "sub_category": ["REIT", "REIT"],
+        "symbol": ["CTRE", "CTRE"],
+        "currency": ["USD", "USD"],
+        "type": ["Withholding Tax", "Dividends"],
+        "amount": [-0.48, 4.35],
+    }
+
+    expected_df = pl.DataFrame(expected_data)
+
+    result_df = handle_dividend_adjustments(df).sort("amount")
+
+    assert_frame_equal(result_df, expected_df)
 
 
 def test_apply_pivot_no_duplicates(sample_df_no_duplicates, caplog):
@@ -200,30 +239,31 @@ def test_apply_pivot_with_duplicates(sample_df_with_duplicates, caplog):
 
 
 @pytest.mark.parametrize(
-    "calculate_reits_separtely",
+    "extract_etf_and_reit",
     [True, False],
 )
 def test_process_cash_transactions_ibkr(
     rates_df,
     dividends_country_summary_df,
-    calculate_reits_separtely,
-    dividends_country_summary_no_reits_df,
-    dividends_reits_summary_df,
+    extract_etf_and_reit,
+    dividends_country_summary_no_etf_reit_df,
+    dividends_etf_reit_summary_df,
 ):
-    res_df, reits_df = process_cash_transactions_ibkr(
+    res_df, etf_reit_df = process_cash_transactions_ibkr(
         "tests/test_data/ibkr/For_tax_automation*",
         rates_df,
         start_date=REPORTING_START_DATE,
         end_date=REPORTING_END_DATE,
-        calc_reits_separately=calculate_reits_separtely,
+        extract_etf_and_reit=extract_etf_and_reit,
     )
-    if calculate_reits_separtely:
-        assert_frame_equal(reits_df, dividends_reits_summary_df)
+
+    if extract_etf_and_reit:
+        assert_frame_equal(etf_reit_df, dividends_etf_reit_summary_df)
     else:
-        assert reits_df is None
-    assert_frame_equal(
-        res_df, dividends_country_summary_no_reits_df if calculate_reits_separtely else dividends_country_summary_df
-    )
+        assert etf_reit_df is None
+    expected = dividends_country_summary_no_etf_reit_df if extract_etf_and_reit else dividends_country_summary_df
+
+    assert_frame_equal(res_df, expected)
 
 
 def test_process_bonds_ibkr(rates_df, bonds_tax_df, bonds_country_summary_df):
@@ -241,43 +281,44 @@ def test_process_bonds_ibkr(rates_df, bonds_tax_df, bonds_country_summary_df):
 def test_calculate_summary_ibkr(dividends_country_summary_df, bonds_country_summary_df):
     ibkr_summary_df = calculate_summary_ibkr(
         dividends_df=dividends_country_summary_df, bonds_df=bonds_country_summary_df
-    )
+    ).sort("profit_total")
 
     expected_df = pl.DataFrame(
         {
-            Column.type: ["dividends", "bonds"],
-            Column.currency: ["USD", "USD"],
-            Column.profit_total: [23.64, 381.08],
-            Column.profit_euro_total: [21.623, 356.6176],
-            Column.profit_euro_net_total: [15.6716, 258.5478],
-            Column.withholding_tax_euro_total: [2.9069, 0],
-            Column.kest_gross_total: [5.9464, 98.0698],
-            Column.kest_net_total: [3.0445, 98.0698],
+            Column.type: ["dividends", "dividends", "bonds"],
+            Column.currency: ["USD", "EUR", "USD"],
+            Column.profit_total: [69.52, 7.6, 381.08],
+            Column.profit_euro_total: [65.4115, 7.6, 356.6176],
+            Column.profit_euro_net_total: [47.4183, 5.51, 258.5478],
+            Column.withholding_tax_euro_total: [3.3471, 1.14, 0],
+            Column.kest_gross_total: [17.9881, 2.09, 98.0698],
+            Column.kest_net_total: [14.646, 0.95, 98.0698],
         }
-    )
+    ).sort("profit_total")
 
     assert_frame_equal(ibkr_summary_df, expected_df)
 
 
 def test_calculate_summary_separate_reits_ibkr(
-    dividends_country_summary_df, bonds_country_summary_df, dividends_reits_summary_df
+    dividends_country_summary_no_etf_reit_df, bonds_country_summary_df, dividends_etf_reit_summary_df
 ):
     ibkr_summary_df = calculate_summary_ibkr(
-        dividends_df=dividends_country_summary_df,
+        dividends_df=dividends_country_summary_no_etf_reit_df,
         bonds_df=bonds_country_summary_df,
-        reits_df=dividends_reits_summary_df,
-    )
+        reits_df=dividends_etf_reit_summary_df,
+    ).sort(Column.currency)
+
     expected_df = pl.DataFrame(
         {
-            Column.type: ["dividends", "bonds", "REIT dividends"],
-            Column.currency: ["USD", "USD", "USD"],
-            Column.profit_total: [23.64, 381.08, 5.53],
-            Column.profit_euro_total: [21.623, 356.6176, 5.072],
-            Column.profit_euro_net_total: [15.6716, 258.5478, 3.6767],
-            Column.withholding_tax_euro_total: [2.9069, 0, 0.7613],
-            Column.kest_gross_total: [5.9464, 98.0698, 1.3948],
-            Column.kest_net_total: [3.0445, 98.0698, 0.634],
+            Column.type: ["dividends", "dividends", "bonds", "ETF/REIT div"],
+            Column.currency: ["EUR", "USD", "USD", "USD"],
+            Column.profit_total: [7.6, 18.11, 381.08, 51.41],
+            Column.profit_euro_total: [7.6, 16.551, 356.6176, 48.8604],
+            Column.profit_euro_net_total: [5.51, 11.9949, 258.5478, 35.4233],
+            Column.withholding_tax_euro_total: [1.14, 2.1456, 0, 1.2015],
+            Column.kest_gross_total: [2.09, 4.5516, 98.0698, 13.4366],
+            Column.kest_net_total: [0.95, 2.4105, 98.0698, 12.2355],
         }
-    )
+    ).sort(Column.currency)
 
     assert_frame_equal(ibkr_summary_df, expected_df)

@@ -7,6 +7,14 @@ from src.const import FLOAT_PRECISION, Column, TransactionTypeIBKR
 from src.utils import calculate_kest, convert_to_euro, extract_elements, join_exchange_rates, read_xml_to_df
 
 
+def handle_dividend_adjustments(df: pl.DataFrame) -> pl.DataFrame:
+    df = df.group_by(
+        ["action_id", "settle_date", "issuer_country_code", "sub_category", "symbol", "currency", "type"]
+    ).agg(pl.sum("amount").alias("amount"))
+
+    return df
+
+
 def apply_pivot(df: pl.DataFrame) -> pl.DataFrame:
     # Grouping keys
     index_keys = [
@@ -65,7 +73,7 @@ def process_cash_transactions_ibkr(
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
-    calc_reits_separately: bool = False,
+    extract_etf_and_reit: bool = False,
 ) -> (pl.DataFrame, pl.DataFrame | None):
     logging.info("\n\n======================== Processing Cash Transactions ========================\n")
     cash_transactions_df = read_xml_to_df(
@@ -74,22 +82,20 @@ def process_cash_transactions_ibkr(
     )
 
     cash_transactions_df = (
-        cash_transactions_df.rename({"subCategory": "sub_category"})
+        cash_transactions_df.rename({"subCategory": "sub_category", "actionID": "action_id"})
         .with_columns(
-            pl.when(pl.col("type") == TransactionTypeIBKR.tax)
-            .then(pl.col("amount").cast(pl.Float64).abs())
-            .otherwise(pl.col("amount").cast(pl.Float64))
-            .alias("amount"),
+            pl.col("amount").cast(pl.Float64).alias("amount"),
             pl.col("issuerCountryCode").alias("issuer_country_code"),
             pl.col("settleDate").str.strptime(pl.Date, "%Y-%m-%d").alias("settle_date"),
         )
         .filter(pl.col("settle_date").is_between(start_date, end_date))
     )
+    cash_transactions_df = handle_dividend_adjustments(cash_transactions_df)
 
     types = cash_transactions_df["type"].unique().to_list()
     logging.info(f"Transaction Types: {types}")
-    sum_per_type_df = cash_transactions_df.group_by("type").agg(pl.col("amount").sum())
-    logging.info(f"\nSum per Transaction Type:\n{sum_per_type_df}")
+    sum_per_type_df = cash_transactions_df.group_by("sub_category", "type").agg(pl.col("amount").sum())
+    logging.info(f"\nSum per Transaction Category-Type:\n{sum_per_type_df}")
 
     # Filter for dividends/tax in Cash Transactions
     cash_transactions_df = cash_transactions_df.select(
@@ -101,7 +107,7 @@ def process_cash_transactions_ibkr(
             .then(pl.lit(TransactionTypeIBKR.dividend))
             .otherwise(pl.col("type"))
             .alias("type"),  # in Austria, PIL is the same as Dividend
-            "amount",
+            pl.col("amount").abs().alias("amount"),
             "settle_date",
             "issuer_country_code",
         ]
@@ -121,18 +127,18 @@ def process_cash_transactions_ibkr(
     pivoted_df = calculate_kest(pivoted_df, amount_col="dividends_euro", tax_withheld_col="withholding_tax_euro")
     logging.debug("\nPivoted with KeST DataFrame:\n {}".format(pivoted_df))
 
-    reit_agg_df = None
-    if calc_reits_separately:
-        reit_df = pivoted_df.filter(pl.col("sub_category") == "REIT")
-        pivoted_df = pivoted_df.filter(pl.col("sub_category") != "REIT")
+    etf_reit_agg_df = None
+    if extract_etf_and_reit:
+        etf_reit_df = pivoted_df.filter(pl.col("sub_category").is_in(["REIT", "ETF"]))
+        pivoted_df = pivoted_df.filter(~pl.col("sub_category").is_in(["REIT", "ETF"]))
 
-        reit_agg_df = agg_final_transactions(reit_df)
-        logging.info("Dividends from REITs:\n{}".format(reit_agg_df))
+        etf_reit_agg_df = agg_final_transactions(etf_reit_df)
+        logging.info("Dividends from REITs:\n{}".format(etf_reit_agg_df))
 
     country_agg_df = agg_final_transactions(pivoted_df)
     logging.info("Dividends by Country:\n{}".format(country_agg_df))
 
-    return country_agg_df, reit_agg_df
+    return country_agg_df, etf_reit_agg_df
 
 
 def process_bonds_ibkr(
@@ -220,7 +226,7 @@ def calculate_summary_ibkr(
     )
     merge_dfs = [dividends_summary_df, bonds_summary_df]
     if reits_df is not None:
-        reits_summary_df = reits_df.group_by(pl.lit("REIT dividends").alias("type"), Column.currency).agg(
+        reits_summary_df = reits_df.group_by(pl.lit("ETF/REIT div").alias("type"), Column.currency).agg(
             pl.col(Column.profit_total).sum().round(FLOAT_PRECISION).alias(Column.profit_total),
             pl.col("dividends_euro_total").sum().round(FLOAT_PRECISION).alias(Column.profit_euro_total),
             pl.col("dividends_euro_net_total").sum().round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),

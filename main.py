@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 
 # Path to your XML file
-xml_file = "data/input/For_tax_automation*"
+xml_file = "data/input/eugene/ib/full/For_tax_automation_*"
 
 # person = "oryna"
 person = "eugene"
@@ -41,7 +41,7 @@ if __name__ == "__main__":
             exchange_rates_df=rates_df,
             start_date=reporting_start_date,
             end_date=reporting_end_date,
-            calc_reits_separately=True,
+            extract_etf_and_reit=True,
         )
 
         bonds_tax_df, bonds_tax_country_agg_df = process_bonds_ibkr(
@@ -116,9 +116,8 @@ if __name__ == "__main__":
 
     create_tax_report(
         report_sections,
-        output_path=f"data/output/tax_report_{person}.pdf",
+        output_path=f"data/output/{person}/tax_report_{person}_{reporting_start_date}_{reporting_end_date}.pdf",
         title=f"Tax Report - {person.capitalize()}",
         start_date=reporting_start_date,
         end_date=reporting_end_date,
     )
-
