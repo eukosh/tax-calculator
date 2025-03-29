@@ -101,7 +101,7 @@ if __name__ == "__main__":
     freedom_summary_df = process_freedom_statement(
         "data/input/oryna/freedom/ff_oryna_2024-10-05 23_59_59_2024-12-31 23_59_59_all.json"
         if person == "oryna"
-        else "data/input/eugene/freedom/freedom_2024-04-30 23_59_59_2024-12-31 23_59_59_all.json",
+        else "data/input/eugene/freedom/_freedom_2024-04-30 23_59_59_2024-12-31 23_59_59_all.json",
         rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
