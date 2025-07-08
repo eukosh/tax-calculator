@@ -16,8 +16,6 @@ logging.basicConfig(
     format="%(levelname)s: %(message)s\n",
 )
 
-# Path to your XML file
-xml_file = "data/input/For_tax_automation*"
 
 person = "oryna"
 # person = "eugene"
@@ -34,6 +32,7 @@ if __name__ == "__main__":
     rates_df = exchange_rates.get_rates()
 
     report_sections: list[ReportSection] = []
+
     
     # ------- IBKR
     ibkr_input_path = f"data/input/{person}/ibkr/For_tax_automation*"
@@ -42,7 +41,7 @@ if __name__ == "__main__":
         exchange_rates_df=rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
-        calc_reits_separately=True,
+        extract_etf_and_reit=True,
     )
 
     bonds_tax_df, bonds_tax_country_agg_df = process_bonds_ibkr(
@@ -58,7 +57,8 @@ if __name__ == "__main__":
         report_end_date=reporting_end_date,
     )
 
-    ibkr_writer.write_csv(dividends_country_agg_df, "dividends_country_agg.csv")
+    if dividends_country_agg_df is not None:
+        ibkr_writer.write_csv(dividends_country_agg_df, "dividends_country_agg.csv")
     if bonds_tax_df is not None:
         ibkr_writer.write_csv(bonds_tax_df, "bonds_tax_df.csv")
         ibkr_writer.write_csv(bonds_tax_country_agg_df, "bonds_tax_country_agg_df.csv")
@@ -104,8 +104,7 @@ if __name__ == "__main__":
     freedom_summary_df = process_freedom_statement(
         "data/input/oryna/freedom/ff_oryna_2024-12-31 23_59_59_2025-07-06 23_59_59_all.json"
         if person == "oryna"
-        else "data/input/eugene/freedom/broker_yevhenii.kosharnyi@gmail.com_2024-12-31_23_59_59_2025-07-04_23_59_59.json",
-        # else "data/input/eugene/freedom/freedom_2024-04-30 23_59_59_2024-12-31 23_59_59_all.json",
+        else "data/input/eugene/freedom/_freedom_2024-04-30 23_59_59_2024-12-31 23_59_59_all.json",
         rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
@@ -120,7 +119,7 @@ if __name__ == "__main__":
 
     create_tax_report(
         report_sections,
-        output_path=f"data/output/tax_report_{person}.pdf",
+        output_path=f"data/output/{person}/tax_report_{person}_{reporting_start_date}_{reporting_end_date}.pdf",
         title=f"Tax Report - {person.capitalize()}",
         start_date=reporting_start_date,
         end_date=reporting_end_date,
