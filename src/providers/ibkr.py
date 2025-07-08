@@ -28,18 +28,20 @@ def apply_pivot(df: pl.DataFrame) -> pl.DataFrame:
         on="type",  # Values in this column become new column names
         aggregate_function="sum",  # Take unique values (default for pivot)
     )
-
+    print(f"\nPivoted DataFrame:\n{pivoted_df}")
     # Rename columns for clarity
     pivoted_df = pivoted_df.rename(
         {
             "amount_Dividends": "dividends",
-            "amount_Withholding Tax": "withholding_tax",
-            "amount_euro_Dividends": "dividends_euro",
-            "amount_euro_Withholding Tax": "withholding_tax_euro",
+            "amount_euro_Dividends": "dividends_euro",   
         }
     ).with_columns(
-        pl.col("withholding_tax").fill_null(0),
-        pl.col("withholding_tax_euro").fill_null(0),
+        (pl.col("amount_Withholding Tax") if "amount_Withholding Tax" in pivoted_df.columns else pl.lit(0.0))
+        .fill_null(0.0)
+        .alias("withholding_tax"),
+        (pl.col("amount_euro_Withholding Tax") if "amount_euro_Withholding Tax" in pivoted_df.columns else pl.lit(0.0))
+        .fill_null(0.0)  # Also fill nulls
+    .alias("withholding_tax_euro"),
     )
 
     return pivoted_df
@@ -124,10 +126,14 @@ def process_cash_transactions_ibkr(
     reit_agg_df = None
     if calc_reits_separately:
         reit_df = pivoted_df.filter(pl.col("sub_category") == "REIT")
-        pivoted_df = pivoted_df.filter(pl.col("sub_category") != "REIT")
+        if reit_df.is_empty():
+            logging.warning("No REIT dividends found in the transactions.")
+            reit_agg_df = None
+        else:
+            pivoted_df = pivoted_df.filter(pl.col("sub_category") != "REIT")
 
-        reit_agg_df = agg_final_transactions(reit_df)
-        logging.info("Dividends from REITs:\n{}".format(reit_agg_df))
+            reit_agg_df = agg_final_transactions(reit_df)
+            logging.info("Dividends from REITs:\n{}".format(reit_agg_df))
 
     country_agg_df = agg_final_transactions(pivoted_df)
     logging.info("Dividends by Country:\n{}".format(country_agg_df))
@@ -145,7 +151,10 @@ def process_bonds_ibkr(
         file_path=xml_file_path,
         xml_extract_func=lambda root: extract_elements(root.find(".//CorporateActions"), "CorporateAction"),
     )
-
+    if corporate_actions_df.is_empty():
+        logging.warning("No Corporate Actions found in the XML file.")
+        return None, None
+    
     corporate_actions_df = corporate_actions_df.select(
         [
             pl.col("reportDate").str.strptime(pl.Date, "%Y-%m-%d").alias("report_date"),
@@ -199,7 +208,7 @@ def process_bonds_ibkr(
 
 
 def calculate_summary_ibkr(
-    dividends_df: pl.DataFrame, bonds_df: pl.DataFrame, reits_df: pl.DataFrame = None
+    dividends_df: pl.DataFrame, bonds_df: pl.DataFrame = None, reits_df: pl.DataFrame = None
 ) -> pl.DataFrame:
     dividends_summary_df = dividends_df.group_by(pl.lit("dividends").alias("type"), Column.currency).agg(
         pl.col(Column.profit_total).sum().round(FLOAT_PRECISION).alias(Column.profit_total),
@@ -210,15 +219,18 @@ def calculate_summary_ibkr(
         pl.col("kest_net_total").sum().round(FLOAT_PRECISION).alias(Column.kest_net_total),
     )
 
-    bonds_summary_df = bonds_df.group_by(pl.lit("bonds").alias("type"), Column.currency).agg(
-        pl.col(Column.profit_total).sum().round(FLOAT_PRECISION).alias(Column.profit_total),
-        pl.col(Column.profit_euro_total).sum().round(FLOAT_PRECISION).alias(Column.profit_euro_total),
-        pl.col(Column.profit_euro_net_total).sum().round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
-        pl.lit(0.0).alias(Column.withholding_tax_euro_total),
-        pl.col(Column.kest_gross_total).sum().round(FLOAT_PRECISION).alias(Column.kest_gross_total),
-        pl.col(Column.kest_net_total).sum().round(FLOAT_PRECISION).alias(Column.kest_net_total),
-    )
-    merge_dfs = [dividends_summary_df, bonds_summary_df]
+    merge_dfs = [dividends_summary_df]
+    if bonds_df:
+        bonds_summary_df = bonds_df.group_by(pl.lit("bonds").alias("type"), Column.currency).agg(
+            pl.col(Column.profit_total).sum().round(FLOAT_PRECISION).alias(Column.profit_total),
+            pl.col(Column.profit_euro_total).sum().round(FLOAT_PRECISION).alias(Column.profit_euro_total),
+            pl.col(Column.profit_euro_net_total).sum().round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
+            pl.lit(0.0).alias(Column.withholding_tax_euro_total),
+            pl.col(Column.kest_gross_total).sum().round(FLOAT_PRECISION).alias(Column.kest_gross_total),
+            pl.col(Column.kest_net_total).sum().round(FLOAT_PRECISION).alias(Column.kest_net_total),
+        )
+        merge_dfs.append(bonds_summary_df)
+
     if reits_df is not None:
         reits_summary_df = reits_df.group_by(pl.lit("REIT dividends").alias("type"), Column.currency).agg(
             pl.col(Column.profit_total).sum().round(FLOAT_PRECISION).alias(Column.profit_total),

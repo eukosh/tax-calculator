@@ -18,6 +18,22 @@ def process_revolut_savings_statement(
     # Convert the extracted data into Polars DataFrames
     statement_df = pl.read_csv(csv_file_path)
 
+    value_col_name = next((col for col in statement_df.columns if col.startswith("Value,")), None)
+
+    if not value_col_name:
+        raise ValueError(
+            "Critical Error: Could not find the value column in the Revolut statement. "
+            "Expected a column starting with 'Value,' (e.g., 'Value, EUR')."
+        )
+    
+    try:
+        # Splits "Value, EUR" into ["Value", " EUR"] and gets the currency part
+        currency_str = value_col_name.split(",")[1].strip().upper()
+        
+        currency = CurrencyCode(currency_str)
+    except (IndexError, ValueError) as e:
+        raise ValueError(f"Could not parse currency from column name: '{value_col_name}'.") from e
+
     processed_statement_df = statement_df.select(
         [
             pl.col("Date").str.to_datetime(format="%b %e, %Y, %I:%M:%S %p").dt.date().alias(Column.date),
@@ -31,23 +47,12 @@ def process_revolut_savings_statement(
                 .otherwise(None)
                 .alias(RevolutColumn.type)
             ),
-            (
-                pl.when(pl.col("Value").str.contains("$", literal=True))
-                .then(pl.lit(CurrencyCode.usd))
-                .when(pl.col("Value").str.contains("€", literal=True))
-                .then(pl.lit(CurrencyCode.euro))
-                .otherwise(None)
-                .alias(Column.currency)
-            ),
-            pl.col("Value")
-            .str.replace("$", "", literal=True)
-            .str.replace("€", "", literal=True)
-            .str.replace(",", "", literal=True)
-            .cast(pl.Float64)
-            .alias(RevolutColumn.amount),
+            pl.lit(currency).alias(Column.currency),
+            pl.col(value_col_name).cast(pl.Float64).alias(RevolutColumn.amount),
         ]
     ).filter(pl.col(Column.date).is_between(start_date, end_date))
-    logging.debug("\nProcessed Statemend Df: %s\n", processed_statement_df)
+
+    logging.debug("\nProcessed Statement Df: %s\n", processed_statement_df)
 
     fees_interest_df = processed_statement_df.filter(
         pl.col(RevolutColumn.type).is_in([RevolutType.fee, RevolutType.interest])
