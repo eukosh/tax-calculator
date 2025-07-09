@@ -34,6 +34,7 @@ def process_freedom_statement(
 
     corporate_actions_df = corporate_actions_df.select(
         pl.col(Column.date).str.to_date("%Y-%m-%d"),
+        pl.col("ex_date").str.to_date("%Y-%m-%d").alias("ex_date"),
         pl.col("type_id").alias(Column.type),
         Column.corporate_action_id,
         Column.ticker,
@@ -42,7 +43,11 @@ def process_freedom_statement(
         pl.col("tax_amount").str.replace(f"^{EMPTY_VALUE}$", "0").cast(pl.Float64).alias(Column.withholding_tax),
         pl.col("q_on_ex_date").cast(pl.Float64).alias(Column.shares_count),
         pl.col("amount_per_one").cast(pl.Float64).alias(Column.amount_per_share),
-    ).filter(pl.col(Column.date).is_between(start_date, end_date))
+    ).filter(pl.col("ex_date").is_between(start_date, end_date))
+    # ATTENTION!!!: thats a huge workaround, i dont think using ex date is right the right thing,
+    # but i'm using it to distinguish between tax periods because of FFs mess with reverted dividends.
+    # I saw that approx. since march 2025 TLT was taxed correctly at 0 without reversal, so next year
+    # check it, maybe they finally fixed it properly and i dont need all these tricks.
 
     dividends_df = corporate_actions_df.filter(pl.col(Column.type) == CorporateActionTypesFF.dividend)
     dividends_reverted_df = corporate_actions_df.filter(pl.col(Column.type) == CorporateActionTypesFF.dividend_reverted)
