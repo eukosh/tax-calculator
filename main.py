@@ -1,12 +1,18 @@
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 
 import polars as pl
+from dateutil.relativedelta import relativedelta
 
 from src.currencies import ExchangeRates
 from src.pdf.tax_report import ReportSection, create_tax_report
 from src.providers.freedom import process_freedom_statement
-from src.providers.ibkr import calculate_summary_ibkr, process_bonds_ibkr, process_cash_transactions_ibkr
+from src.providers.ibkr import (
+    calculate_summary_ibkr,
+    process_bonds_ibkr,
+    process_cash_transactions_ibkr,
+    process_trades_ibkr,
+)
 from src.providers.revolut import process_revolut_savings_statement
 from src.providers.wise import process_wise_statement
 from src.writer import PolarsWriter
@@ -17,25 +23,47 @@ logging.basicConfig(
 )
 
 
-person = "oryna"
-# person = "eugene"
+# person = "oryna"
+person = "eugene"
+ibkr_input_path = "data/input/eugene/ib/full/For_tax_automation_2025.xml"
 
 if __name__ == "__main__":
     pl.Config.set_tbl_rows(100)
     pl.Config.set_tbl_cols(100)
     reporting_start_date = date(2025, 1, 1)
-    reporting_end_date = date(2025, 6, 30)
+    reporting_end_date = date(2025, 12, 31)
     # reporting_start_date = date(2024, 1, 1)
     # reporting_end_date = date(2024, 12, 31)
 
-    exchange_rates = ExchangeRates(start_date="2025-01-01", end_date="2025-06-30", overwrite=False)
+    logging.info(f"Reporting dates: {reporting_start_date} - {reporting_end_date}")
+
+    now = datetime.now(tz=UTC)
+    rates_start_date = date(year=now.year - 3, month=1, day=1)
+    rates_end_date = reporting_end_date + relativedelta(weeks=1)
+    if reporting_start_date < rates_start_date:
+        rates_start_date = reporting_start_date
+
+    logging.info(f"Exchange rate dates: {rates_start_date} - {rates_end_date}")
+    # seems like no reason to persist rates since in prod use cases every day we would have to fetch new ones anyway
+    # actually the whole process has to be smarter. Reporting period could be last fiscal year,
+    # but the stock that was sold last year could be bought 10 years ago, so we need rates for the buy date as well
+    # I like the idea of decoupling these 2 processes: rate fetching from ecb and tax calculation
+    # In prod there could be a separate db of rates and a cron that would fetch new rates daily.
+    # Or a simpler way -> infer start and end dates from brokerage statements and fetch from ecb on the fly
+    exchange_rates = ExchangeRates(start_date=rates_start_date, end_date=rates_end_date, overwrite=True)
     rates_df = exchange_rates.get_rates()
 
     report_sections: list[ReportSection] = []
 
-    
     # ------- IBKR
-    ibkr_input_path = f"data/input/{person}/ibkr/For_tax_automation*"
+    trades_pnl_df = process_trades_ibkr(
+        xml_file_path=ibkr_input_path,
+        exchange_rates_df=rates_df,
+        start_date=reporting_start_date,
+        end_date=reporting_end_date,
+    )
+
+    print(trades_pnl_df)
     dividends_country_agg_df, reit_divs_agg_df = process_cash_transactions_ibkr(
         xml_file_path=ibkr_input_path,
         exchange_rates_df=rates_df,
@@ -83,6 +111,7 @@ if __name__ == "__main__":
     )
     revolut_writer.write_csv(revolut_summary_df, "revolut_tax_summary.csv")
     report_sections.append(ReportSection("Revolut", revolut_summary_df))
+
     if person == "oryna":
         # ------- Wise
         wise_summary_df = process_wise_statement(

@@ -16,12 +16,11 @@ class ExchangeRates:
         overwrite=False,
         raw_file_path="data/input/currencies/raw_exchange_rates.csv",
     ):
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date = start_date if isinstance(start_date, str) else start_date.strftime("%Y-%m-%d")
+        self.end_date = end_date if isinstance(end_date, str) else end_date.strftime("%Y-%m-%d")
         self.currency_str = "+".join(currencies)
         self.raw_file_path = raw_file_path
         self.overwrite = overwrite
-        self.df = None  # To hold the Polars DataFrame
 
         # Check if raw file exists or overwrite is enabled
         if overwrite or not os.path.exists(raw_file_path):

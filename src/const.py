@@ -22,9 +22,13 @@ class CorporateActionTypesFF(StrEnum):
 class Column(StrEnum):
     amount = auto()
     amount_euro = auto()
+    symbol = auto()
+    proceeds = auto()
+    proceeds_euro = auto()
     amount_euro_net = auto()
     amount_euro_received_total = auto()
     amount_per_share = auto()
+    buy_date = auto()
     corporate_action_id = auto()
     currency = auto()
     date = auto()
@@ -54,6 +58,7 @@ class Column(StrEnum):
     withholding_tax_euro = auto()
     withholding_tax_euro_total = auto()
     issuer_country_code = auto()
+    trade_date = auto()
 
 
 class RevolutColumn(StrEnum):
