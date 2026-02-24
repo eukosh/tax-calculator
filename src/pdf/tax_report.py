@@ -110,4 +110,19 @@ def create_tax_report(
     elements.append(Spacer(1, 12))
     elements.append(Paragraph("Glossary", styles["Heading1"]))
     elements.append(ListFlowable(legend_items.values(), bulletType="bullet"))
+
+    has_trades_row = any(
+        (Column.type in section.df.columns) and section.df.filter(pl.col(Column.type) == "trades").height > 0
+        for section in sections
+    )
+    if has_trades_row:
+        elements.append(Spacer(1, 8))
+        elements.append(
+            Paragraph(
+                "* Note: Trades are converted to EUR at processing time "
+                "(buy-date FX for cost, sell-date FX for proceeds) and then aggregated in EUR. "
+                "So the trades row is shown in EUR.",
+                styles["Normal"],
+            )
+        )
     pdf.build(elements)

@@ -1,10 +1,10 @@
 import glob
 import json
 import logging
-from typing import Callable, Sequence, Union
+from typing import Callable, Sequence, TypeGuard, Union
 
+import lxml.etree as etree
 import polars as pl
-from lxml import etree
 
 from src.const import (
     EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET,
@@ -14,6 +14,10 @@ from src.const import (
     Column,
     CurrencyCode,
 )
+
+
+def has_rows(df: pl.DataFrame | None) -> TypeGuard[pl.DataFrame]:
+    return df is not None and not df.is_empty()
 
 
 # Helper function to extract elements into a list of dictionaries
@@ -88,11 +92,11 @@ def read_csv_to_df(file_path: str) -> pl.DataFrame:
     return pl.concat(dfs, how="vertical")
 
 
-def join_exchange_rates(df: pl.DataFrame, rates_df: pl.DataFrame, df_date_col: str | list[str]) -> pl.DataFrame:
+def join_exchange_rates(df: pl.DataFrame, rates_df: pl.DataFrame, df_date_col: str) -> pl.DataFrame:
     if Column.currency not in df.columns:
         raise ValueError("df is missing a 'currency' column.")
 
-    rates_df_required_cols = {Column.currency, Column.rate_date, Column.exchange_rate}
+    rates_df_required_cols: set[str] = {Column.currency.value, Column.rate_date.value, Column.exchange_rate.value}
     rates_df_missing_cols = rates_df_required_cols - set(rates_df.columns)
     if rates_df_missing_cols != set():
         raise ValueError(f"rates_df is missing the following required columns: {rates_df_missing_cols}")
@@ -106,60 +110,54 @@ def join_exchange_rates(df: pl.DataFrame, rates_df: pl.DataFrame, df_date_col: s
     if rates_df_missing_currencies:
         raise ValueError(f"rates_df is missing the following currencies: {rates_df_missing_currencies}")
 
-    df_date_col = df_date_col if isinstance(df_date_col, list) else [df_date_col]
-
     # order here is important for join_asof
     rates_df = rates_df.sort([Column.currency, Column.rate_date])
-    for date_col in df_date_col:
-        # order here is important for join_asof
-        sorted_df = df.sort([Column.currency, date_col])
+    df = df.sort([Column.currency, df_date_col])
 
-        joined_df = sorted_df.join_asof(
-            rates_df,
-            left_on=date_col,
-            right_on=Column.rate_date,
-            by=Column.currency,
-            strategy="backward",  # Fallback to the previous available date
-        )
+    joined_df = df.join_asof(
+        rates_df,
+        left_on=df_date_col,
+        right_on=Column.rate_date,
+        by=Column.currency,
+        strategy="backward",  # Fallback to the previous available date
+    )
 
-        # make sure it works when no conversion is needed
-        unmatched_dates_df = joined_df.filter(
-            (pl.col(Column.currency) != CurrencyCode.euro)
-            & (
-                (pl.col(Column.rate_date) != pl.col(date_col))
-                | (pl.col(Column.rate_date).is_null() | pl.col(date_col).is_null())
+    # For non-EUR rows, null means we could not find any usable rate at or before transaction date.
+    null_rate_df = joined_df.filter((pl.col(Column.currency) != CurrencyCode.euro) & pl.col(Column.rate_date).is_null())
+    if not null_rate_df.is_empty():
+        logging.error(f"\nFailed to match exchange rate for some non-EUR rows:\n{null_rate_df}")
+        raise ValueError("Some dates did not match. See the logs above.")
+
+    # Non-exact matches are allowed only within an acceptable offset.
+    unmatched_dates_df = joined_df.filter(
+        (pl.col(Column.currency) != CurrencyCode.euro) & (pl.col(Column.rate_date) != pl.col(df_date_col))
+    )
+    if unmatched_dates_df.shape[0] > 0:
+        logging.warning(f"\nSome dates did not match exactly, double check:\n{unmatched_dates_df}")
+
+        mismatches_in_acceptable_range_df = unmatched_dates_df.filter(
+            pl.col(Column.rate_date).is_between(
+                pl.col(df_date_col).dt.offset_by(f"-{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET}d"),
+                pl.col(df_date_col).dt.offset_by(f"{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET}d"),
             )
         )
 
-        if unmatched_dates_df.shape[0] > 0:
-            logging.warning(f"\nSome dates did not match, it might be okay, but double check:\n{unmatched_dates_df}")
-
-            mismatches_in_acceptable_range_df = unmatched_dates_df.filter(
-                pl.col(Column.rate_date).is_between(
-                    pl.col(date_col).dt.offset_by(f"-{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET}d"),
-                    pl.col(date_col).dt.offset_by(f"{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET}d"),
-                )
+        if mismatches_in_acceptable_range_df.shape[0] != unmatched_dates_df.shape[0]:
+            unacceptable_date_mismatch = unmatched_dates_df.join(
+                mismatches_in_acceptable_range_df,
+                on=unmatched_dates_df.columns,
+                how="anti",
             )
+            logging.error(
+                "A few matched rates are outside acceptable range of +-{} days:\n{}".format(
+                    EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, unacceptable_date_mismatch
+                ),
+            )
+            raise ValueError("Some dates did not match. See the logs above.")
 
-            if mismatches_in_acceptable_range_df.shape[0] == unmatched_dates_df.shape[0]:
-                logging.warning(
-                    f"\nSome dates did not match, but ALL are within acceptable range of +-{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET} day ✅.",
-                )
-                return joined_df
-            else:
-                unacceptable_date_mismatch = unmatched_dates_df.join(
-                    mismatches_in_acceptable_range_df,
-                    on=unmatched_dates_df.columns,
-                    how="anti",
-                )
-
-                logging.error(
-                    "Unfortunatelly, a few dates are outside of the acceptable range of +-{} days or null:\n{}".format(
-                        EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, unacceptable_date_mismatch
-                    ),
-                )
-
-                raise ValueError("Some dates did not match. See the logs above.")
+        logging.warning(
+            f"\nSome dates did not match exactly, but all are within +- {EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET} day.",
+        )
 
     return joined_df
 
@@ -182,7 +180,7 @@ def convert_to_euro(df: pl.DataFrame, col_to_convert: Union[str, Sequence[str]])
 
 
 def calculate_kest(
-    df: pl.DataFrame, amount_col: str, tax_withheld_col: str = None, net_col_name: str = None
+    df: pl.DataFrame, amount_col: str, tax_withheld_col: str | None = None, net_col_name: str | None = None
 ) -> pl.DataFrame:
     # Net Austrian KESt=Austrian KESt on Gross amount − min(Foreign Withholding Tax,Treaty Rate × Gross Dividends)
     # keep in mind that witholding tax is negative number, it causes error in formula

@@ -6,11 +6,13 @@ from polars.testing.asserts import assert_frame_equal
 
 from src.const import Column
 from src.providers.ibkr import (
+    IbkrSummarySection,
     apply_pivot,
     calculate_summary_ibkr,
     handle_dividend_adjustments,
     process_bonds_ibkr,
     process_cash_transactions_ibkr,
+    process_trades_ibkr,
 )
 
 REPORTING_START_DATE = date(2024, 1, 1)
@@ -280,7 +282,10 @@ def test_process_bonds_ibkr(rates_df, bonds_tax_df, bonds_country_summary_df):
 
 def test_calculate_summary_ibkr(dividends_country_summary_df, bonds_country_summary_df):
     ibkr_summary_df = calculate_summary_ibkr(
-        dividends_df=dividends_country_summary_df, bonds_df=bonds_country_summary_df
+        sections=[
+            IbkrSummarySection("dividends", dividends_country_summary_df),
+            IbkrSummarySection("bonds", bonds_country_summary_df),
+        ]
     ).sort("profit_total")
 
     expected_df = pl.DataFrame(
@@ -303,9 +308,11 @@ def test_calculate_summary_separate_reits_ibkr(
     dividends_country_summary_no_etf_reit_df, bonds_country_summary_df, dividends_etf_reit_summary_df
 ):
     ibkr_summary_df = calculate_summary_ibkr(
-        dividends_df=dividends_country_summary_no_etf_reit_df,
-        bonds_df=bonds_country_summary_df,
-        reits_df=dividends_etf_reit_summary_df,
+        sections=[
+            IbkrSummarySection("dividends", dividends_country_summary_no_etf_reit_df),
+            IbkrSummarySection("bonds", bonds_country_summary_df),
+            IbkrSummarySection("reit_dividends", dividends_etf_reit_summary_df),
+        ]
     ).sort(Column.currency)
 
     expected_df = pl.DataFrame(
@@ -322,3 +329,187 @@ def test_calculate_summary_separate_reits_ibkr(
     ).sort(Column.currency)
 
     assert_frame_equal(ibkr_summary_df, expected_df)
+
+
+def test_process_trades_ibkr_uses_buy_and_sell_rates(tmp_path):
+    xml_content = """\
+<FlexQueryResponse>
+  <FlexStatements count="1">
+    <FlexStatement>
+      <Trades>
+        <Lot symbol="AAPL" currency="USD" openDateTime="2024-01-02 10:00:00" tradeDate="2024-06-03" cost="100" fifoPnlRealized="20" />
+      </Trades>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    xml_path = tmp_path / "trades.xml"
+    xml_path.write_text(xml_content)
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 1, 2), date(2024, 6, 3)],
+            Column.currency: ["USD", "USD"],
+            Column.exchange_rate: [1.0, 1.2],
+        }
+    )
+
+    detail_df, summary_df = process_trades_ibkr(
+        xml_file_path=str(xml_path),
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+    )
+
+    expected_detail_df = pl.DataFrame(
+        {
+            Column.symbol: ["AAPL"],
+            Column.currency: ["USD"],
+            Column.buy_date: [date(2024, 1, 2)],
+            Column.trade_date: [date(2024, 6, 3)],
+            "buy_exchange_rate": [1.0],
+            "sell_exchange_rate": [1.2],
+            "cost": [100.0],
+            "cost_euro": [100.0],
+            Column.proceeds: [120.0],
+            Column.proceeds_euro: [100.0],
+            Column.profit: [20.0],
+            Column.profit_euro: [0.0],
+        }
+    )
+    expected_summary_df = pl.DataFrame(
+        {
+            Column.currency: ["EUR"],
+            Column.profit_total: [0.0],
+            Column.profit_euro_total: [0.0],
+            Column.profit_euro_net_total: [0.0],
+            Column.withholding_tax_euro_total: [0.0],
+            Column.kest_gross_total: [0.0],
+            Column.kest_net_total: [0.0],
+        }
+    )
+
+    assert_frame_equal(detail_df, expected_detail_df)
+    assert_frame_equal(summary_df, expected_summary_df)
+
+
+def test_process_trades_ibkr_clips_taxable_profit_on_loss(tmp_path):
+    xml_content = """\
+<FlexQueryResponse>
+  <FlexStatements count="1">
+    <FlexStatement>
+      <Trades>
+        <Lot symbol="AAPL" currency="USD" openDateTime="2024-01-02 10:00:00" tradeDate="2024-06-03" cost="100" fifoPnlRealized="-20" />
+      </Trades>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    xml_path = tmp_path / "trades_loss.xml"
+    xml_path.write_text(xml_content)
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 1, 2), date(2024, 6, 3)],
+            Column.currency: ["USD", "USD"],
+            Column.exchange_rate: [1.0, 1.0],
+        }
+    )
+
+    detail_df, summary_df = process_trades_ibkr(
+        xml_file_path=str(xml_path),
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+    )
+
+    expected_detail_df = pl.DataFrame(
+        {
+            Column.symbol: ["AAPL"],
+            Column.currency: ["USD"],
+            Column.buy_date: [date(2024, 1, 2)],
+            Column.trade_date: [date(2024, 6, 3)],
+            "buy_exchange_rate": [1.0],
+            "sell_exchange_rate": [1.0],
+            "cost": [100.0],
+            "cost_euro": [100.0],
+            Column.proceeds: [80.0],
+            Column.proceeds_euro: [80.0],
+            Column.profit: [-20.0],
+            Column.profit_euro: [-20.0],
+        }
+    )
+    expected_summary_df = pl.DataFrame(
+        {
+            Column.currency: ["EUR"],
+            Column.profit_total: [-20.0],
+            Column.profit_euro_total: [-20.0],
+            Column.profit_euro_net_total: [-20.0],
+            Column.withholding_tax_euro_total: [0.0],
+            Column.kest_gross_total: [0.0],
+            Column.kest_net_total: [0.0],
+        }
+    )
+
+    assert_frame_equal(detail_df, expected_detail_df)
+    assert_frame_equal(summary_df, expected_summary_df)
+
+
+def test_process_trades_ibkr_raises_without_buy_side_rate(tmp_path):
+    xml_content = """\
+<FlexQueryResponse>
+  <FlexStatements count="1">
+    <FlexStatement>
+      <Trades>
+        <Lot symbol="AAPL" currency="USD" openDateTime="2023-01-02 10:00:00" tradeDate="2024-06-03" cost="100" fifoPnlRealized="20" />
+      </Trades>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    xml_path = tmp_path / "trades_missing_buy_rate.xml"
+    xml_path.write_text(xml_content)
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 6, 3)],
+            Column.currency: ["USD"],
+            Column.exchange_rate: [1.2],
+        }
+    )
+
+    with pytest.raises(ValueError, match="Some dates did not match. See the logs above."):
+        process_trades_ibkr(
+            xml_file_path=str(xml_path),
+            exchange_rates_df=rates_df,
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 12, 31),
+        )
+
+
+def test_calculate_summary_ibkr_rejects_duplicate_sections(dividends_country_summary_df):
+    with pytest.raises(ValueError, match="Duplicate IBKR summary section: dividends"):
+        calculate_summary_ibkr(
+            sections=[
+                IbkrSummarySection("dividends", dividends_country_summary_df),
+                IbkrSummarySection("dividends", dividends_country_summary_df),
+            ]
+        )
+
+
+def test_calculate_summary_ibkr_empty_sections_returns_empty_summary():
+    result = calculate_summary_ibkr(sections=[])
+
+    expected_columns = {
+        Column.type,
+        Column.currency,
+        Column.profit_total,
+        Column.profit_euro_total,
+        Column.profit_euro_net_total,
+        Column.withholding_tax_euro_total,
+        Column.kest_gross_total,
+        Column.kest_net_total,
+    }
+
+    assert result.is_empty()
+    assert set(result.columns) == expected_columns
