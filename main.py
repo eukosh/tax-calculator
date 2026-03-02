@@ -1,11 +1,13 @@
 import logging
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import polars as pl
 from dateutil.relativedelta import relativedelta
 
-from src.currencies import ExchangeRates
+from src.currencies import ExchangeRates, ExchangeRatesCacheError
 from src.pdf.tax_report import ReportSection, create_tax_report
+from src.providers.freedom import process_freedom_statement
 from src.providers.ibkr import (
     IbkrSummarySection,
     calculate_summary_ibkr,
@@ -26,6 +28,11 @@ logging.basicConfig(
 # person = "oryna"
 person = "eugene"
 ibkr_input_path = "data/input/eugene/2025/ibkr_20250101_20251231.xml"
+freedom_input_path = (
+    "data/input/oryna/freedom/ff_oryna_2024-12-31 23_59_59_2025-07-06 23_59_59_all.json"
+    if person == "oryna"
+    else "data/input/eugene/2025/freedom_2024-12-31 23_59_59_2025-12-31 23_59_59_all.json"
+)
 
 if __name__ == "__main__":
     pl.Config.set_tbl_rows(100)
@@ -50,7 +57,11 @@ if __name__ == "__main__":
     # I like the idea of decoupling these 2 processes: rate fetching from ecb and tax calculation
     # In prod there could be a separate db of rates and a cron that would fetch new rates daily.
     # Or a simpler way -> infer start and end dates from brokerage statements and fetch from ecb on the fly
-    exchange_rates = ExchangeRates(start_date=rates_start_date, end_date=rates_end_date, overwrite=True)
+    try:
+        exchange_rates = ExchangeRates(start_date=rates_start_date, end_date=rates_end_date, overwrite=False)
+    except ExchangeRatesCacheError as cache_error:
+        logging.warning("Cached exchange rates are insufficient (%s). Refreshing from ECB...", cache_error)
+        exchange_rates = ExchangeRates(start_date=rates_start_date, end_date=rates_end_date, overwrite=True)
     rates_df = exchange_rates.get_rates()
 
     report_sections: list[ReportSection] = []
@@ -141,21 +152,25 @@ if __name__ == "__main__":
         report_sections.append(ReportSection("Wise", wise_summary_df))
 
     # ------- Freedom Finance
-    # freedom_summary_df = process_freedom_statement(
-    #     "data/input/oryna/freedom/ff_oryna_2024-12-31 23_59_59_2025-07-06 23_59_59_all.json"
-    #     if person == "oryna"
-    #     else "data/input/eugene/freedom/_freedom_2024-04-30 23_59_59_2024-12-31 23_59_59_all.json",
-    #     rates_df,
-    #     start_date=reporting_start_date,
-    #     end_date=reporting_end_date,
-    # )
-    # ff_writer = PolarsWriter(
-    #     output_dir=f"data/output/{person}/freedom",
-    #     report_start_date=reporting_start_date,
-    #     report_end_date=reporting_end_date,
-    # )
-    # ff_writer.write_csv(freedom_summary_df, "freedom_tax_summary.csv")
-    # report_sections.append(ReportSection("Freedom Finance", freedom_summary_df))
+    exclusion_file_path = f"data/input/{person}/freedom/dividend_entries_to_be_excluded_from_future_tax.csv"
+    incorrect_withholding_tax_output_file = (
+        f"data/output/{person}/freedom/dividends_with_incorrect_non_0_withholding_tax.csv"
+    )
+    freedom_summary_df = process_freedom_statement(
+        freedom_input_path,
+        rates_df,
+        start_date=reporting_start_date,
+        end_date=reporting_end_date,
+        exclude_corporate_action_ids_file=exclusion_file_path if Path(exclusion_file_path).exists() else None,
+        incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
+    )
+    ff_writer = PolarsWriter(
+        output_dir=f"data/output/{person}/freedom",
+        report_start_date=reporting_start_date,
+        report_end_date=reporting_end_date,
+    )
+    ff_writer.write_csv(freedom_summary_df, "freedom_tax_summary.csv")
+    report_sections.append(ReportSection("Freedom Finance", freedom_summary_df))
 
     create_tax_report(
         report_sections,

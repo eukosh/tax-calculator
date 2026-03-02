@@ -11,6 +11,10 @@ import requests
 from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
 
 
+class ExchangeRatesCacheError(ValueError):
+    pass
+
+
 class ExchangeRates:
     def __init__(
         self,
@@ -88,23 +92,25 @@ class ExchangeRates:
 
     def _validate_coverage(self):
         if self.df is None or self.df.is_empty():
-            raise ValueError("Exchange rates dataset is empty.")
+            raise ExchangeRatesCacheError("Exchange rates dataset is empty.")
 
         available_currencies = set(self.df["currency"].unique().to_list())
         missing_currencies = set(self.currencies) - available_currencies
         if missing_currencies:
-            raise ValueError(f"Exchange rates are missing requested currencies: {sorted(missing_currencies)}")
+            raise ExchangeRatesCacheError(
+                f"Exchange rates are missing requested currencies: {sorted(missing_currencies)}"
+            )
 
         min_rate_date_raw = self.df["rate_date"].min()
         max_rate_date_raw = self.df["rate_date"].max()
         if not isinstance(min_rate_date_raw, date) or not isinstance(max_rate_date_raw, date):
-            raise ValueError("Exchange rates dataset does not contain valid dates.")
+            raise ExchangeRatesCacheError("Exchange rates dataset does not contain valid dates.")
         min_rate_date = min_rate_date_raw
         max_rate_date = max_rate_date_raw
 
         offset = timedelta(days=EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET)
         if min_rate_date > self.start_date + offset or max_rate_date < self.end_date - offset:
-            raise ValueError(
+            raise ExchangeRatesCacheError(
                 f"Exchange rates file does not cover requested period "
                 f"{self.start_date}..{self.end_date}. Available dates: {min_rate_date}..{max_rate_date}. "
                 "Refresh the cache with overwrite=True."
