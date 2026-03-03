@@ -152,7 +152,7 @@ if __name__ == "__main__":
     if person == "oryna":
         # ------- Wise
         wise_summary_df = process_wise_statement(
-            f"data/input/{person}/wise/wise*",
+            "data/input/oryna/2025/wise*.csv",
             rates_df,
             start_date=reporting_start_date,
             end_date=reporting_end_date,
