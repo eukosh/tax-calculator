@@ -15,6 +15,7 @@ from src.providers.ibkr import (
     process_cash_transactions_ibkr,
     process_trades_ibkr,
 )
+from src.providers.revolut import process_revolut_savings_statement
 from src.providers.wise import process_wise_statement
 from src.utils import has_rows
 from src.writer import PolarsWriter
@@ -118,21 +119,35 @@ if __name__ == "__main__":
     report_sections.append(ReportSection("IBKR", summary_ibkr_df))
 
     # ------- Revolut
-    # revolut_summary_df = process_revolut_savings_statement(
-    #     "data/input/oryna/revolut/savings_statement_2025_01_01_2025_06_30.csv"
-    #     if person == "oryna"
-    #     else "data/input/eugene/revolut/savings-statement_2024-10-07_2024-12-31.csv",
-    #     rates_df,
-    #     start_date=reporting_start_date,
-    #     end_date=reporting_end_date,
-    # )
-    # revolut_writer = PolarsWriter(
-    #     output_dir=f"data/output/{person}/revolut",
-    #     report_start_date=reporting_start_date,
-    #     report_end_date=reporting_end_date,
-    # )
-    # revolut_writer.write_csv(revolut_summary_df, "revolut_tax_summary.csv")
-    # report_sections.append(ReportSection("Revolut", revolut_summary_df))
+    revolut_statement_paths = (
+        ["data/input/oryna/revolut/savings_statement_2025_01_01_2025_06_30.csv"]
+        if person == "oryna"
+        else [
+            "data/input/eugene/2025/revolut_2025-01-01_2025-12-31_en_eur.csv",
+            "data/input/eugene/2025/revolut_2025-01-01_2025-12-31_en_usd.csv",
+        ]
+    )
+
+    revolut_summary_df = pl.concat(
+        [
+            process_revolut_savings_statement(
+                statement_path,
+                rates_df,
+                start_date=reporting_start_date,
+                end_date=reporting_end_date,
+            )
+            for statement_path in revolut_statement_paths
+        ],
+        how="vertical",
+    ).sort("profit_euro_total", descending=True)
+
+    revolut_writer = PolarsWriter(
+        output_dir=f"data/output/{person}/revolut",
+        report_start_date=reporting_start_date,
+        report_end_date=reporting_end_date,
+    )
+    revolut_writer.write_csv(revolut_summary_df, "revolut_tax_summary.csv")
+    report_sections.append(ReportSection("Revolut", revolut_summary_df))
 
     if person == "oryna":
         # ------- Wise
