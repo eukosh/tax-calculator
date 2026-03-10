@@ -47,6 +47,7 @@ TRADES_SCHEMA = {
     TRADE_OPERATION_COL: pl.String,
     Col.profit: pl.Float64,
 }
+STOCK_AWARD_TYPE = "stock_award"
 
 
 def _assert_required_columns(df: pl.DataFrame, required_columns: set[str], section_name: str) -> None:
@@ -312,6 +313,81 @@ def _summarize_dividends(
     )
 
 
+def _load_stock_awards_df(statement: dict) -> pl.DataFrame:
+    awards_raw = statement.get("securities_in_outs") or []
+    if not awards_raw:
+        return pl.DataFrame(schema={Col.ticker: pl.String, "_award_date": pl.Date, "_award_quantity": pl.Float64})
+
+    awards_df = pl.DataFrame(awards_raw)
+    required_columns = {"ticker", "quantity", "type"}
+    if not required_columns.issubset(set(awards_df.columns)):
+        return pl.DataFrame(schema={Col.ticker: pl.String, "_award_date": pl.Date, "_award_quantity": pl.Float64})
+
+    datetime_source = (
+        pl.coalesce(
+            [
+                pl.col("datetime").cast(pl.String, strict=False),
+                pl.col("date_created").cast(pl.String, strict=False),
+            ]
+        )
+        .str.slice(0, 10)
+        .str.to_date("%Y-%m-%d", strict=False)
+    )
+
+    return (
+        awards_df.filter(pl.col("type").cast(pl.String) == STOCK_AWARD_TYPE)
+        .select(
+            pl.col("ticker").cast(pl.String).alias(Col.ticker),
+            datetime_source.alias("_award_date"),
+            pl.col("quantity").cast(pl.Float64, strict=False).fill_null(0.0).alias("_award_quantity"),
+        )
+        .filter(pl.col("_award_date").is_not_null() & (pl.col("_award_quantity") > 0))
+    )
+
+
+def _mark_award_profit_fallback_eligible(statement: dict, trades_df: pl.DataFrame) -> pl.DataFrame:
+    awards_df = _load_stock_awards_df(statement)
+    if awards_df.is_empty() or trades_df.is_empty():
+        return trades_df.with_columns(pl.lit(False).alias("_award_profit_eligible"))
+
+    awards_cum_df = (
+        awards_df.group_by(Col.ticker, "_award_date")
+        .agg(pl.sum("_award_quantity").alias("_award_quantity"))
+        .sort([Col.ticker, "_award_date"])
+        .with_columns(pl.col("_award_quantity").cum_sum().over(Col.ticker).alias("_award_cum_quantity"))
+    )
+
+    candidate_df = (
+        trades_df.with_row_index("_row_idx")
+        .filter(
+            (pl.col(TRADE_OPERATION_COL) == "sell")
+            & pl.col("_fifo_profit_raw").fill_null(0.0).abs().le(ABS_EPSILON)
+            & pl.col("_profit_raw").fill_null(0.0).abs().gt(ABS_EPSILON)
+        )
+        .sort([Col.ticker, Col.trade_date, "_row_idx"])
+        .with_columns(pl.col("_trade_quantity").cum_sum().over(Col.ticker).alias("_candidate_sell_cum_quantity"))
+        .join_asof(
+            awards_cum_df.sort([Col.ticker, "_award_date"]),
+            left_on=Col.trade_date,
+            right_on="_award_date",
+            by=Col.ticker,
+            strategy="backward",
+        )
+        .with_columns(
+            pl.col("_award_cum_quantity").fill_null(0.0).alias("_award_cum_quantity"),
+            (pl.col("_candidate_sell_cum_quantity") <= pl.col("_award_cum_quantity")).alias("_award_profit_eligible"),
+        )
+        .select("_row_idx", "_award_profit_eligible")
+    )
+
+    return (
+        trades_df.with_row_index("_row_idx")
+        .join(candidate_df, on="_row_idx", how="left")
+        .with_columns(pl.col("_award_profit_eligible").fill_null(False))
+        .drop("_row_idx")
+    )
+
+
 def _load_trades_df(statement: dict, exchange_rates_df: pl.DataFrame, start_date: date, end_date: date) -> pl.DataFrame:
     """
     1. Read Freedom trades and return an empty typed dataframe when no trades are present.
@@ -339,19 +415,8 @@ def _load_trades_df(statement: dict, exchange_rates_df: pl.DataFrame, start_date
     if not has_fifo_profit and not has_profit:
         raise ValueError("Freedom trades must include at least one of: fifo_profit, profit")
 
-    if has_fifo_profit and has_profit:
-        fifo_profit_expr = pl.col("fifo_profit").cast(pl.Float64, strict=False)
-        profit_expr = pl.col("profit").cast(pl.Float64, strict=False)
-        realized_profit_expr = (
-            pl.when(fifo_profit_expr.is_not_null() & (fifo_profit_expr.abs() > ABS_EPSILON))
-            .then(fifo_profit_expr)
-            .otherwise(profit_expr)
-            .alias(Col.profit)
-        )
-    elif has_fifo_profit:
-        realized_profit_expr = pl.col("fifo_profit").cast(pl.Float64, strict=False).alias(Col.profit)
-    else:
-        realized_profit_expr = pl.col("profit").cast(pl.Float64, strict=False).alias(Col.profit)
+    fifo_profit_expr = pl.col("fifo_profit").cast(pl.Float64, strict=False) if has_fifo_profit else pl.lit(None)
+    profit_expr = pl.col("profit").cast(pl.Float64, strict=False) if has_profit else pl.lit(None)
 
     trades_df = (
         trades_df.select(
@@ -359,12 +424,37 @@ def _load_trades_df(statement: dict, exchange_rates_df: pl.DataFrame, start_date
             pl.col("instr_nm").cast(pl.String).alias(Col.ticker),
             pl.col("curr_c").cast(pl.String).alias(Col.currency),
             pl.col(TRADE_OPERATION_COL).cast(pl.String).str.to_lowercase().alias(TRADE_OPERATION_COL),
-            realized_profit_expr,
+            pl.col("q").cast(pl.Float64, strict=False).fill_null(0.0).abs().alias("_trade_quantity"),
+            fifo_profit_expr.alias("_fifo_profit_raw"),
+            profit_expr.alias("_profit_raw"),
         )
         .filter(pl.col(Col.trade_date).is_between(start_date, end_date))
-        .filter(pl.col(Col.profit).is_not_null())
         .filter(~pl.col(Col.ticker).str.to_uppercase().str.contains(r"^[A-Z]{3}/[A-Z]{3}$"))
-        .filter(pl.col(Col.profit) != 0)
+    )
+
+    if trades_df.is_empty():
+        return pl.DataFrame(schema={**TRADES_SCHEMA, Col.profit_euro: pl.Float64})
+
+    if has_fifo_profit and has_profit:
+        trades_df = _mark_award_profit_fallback_eligible(statement=statement, trades_df=trades_df).with_columns(
+            pl.when(pl.col("_fifo_profit_raw").is_not_null() & (pl.col("_fifo_profit_raw").abs() > ABS_EPSILON))
+            .then(pl.col("_fifo_profit_raw"))
+            .when(pl.col("_award_profit_eligible"))
+            .then(pl.col("_profit_raw"))
+            .otherwise(None)
+            .alias(Col.profit)
+        )
+    elif has_fifo_profit:
+        trades_df = trades_df.with_columns(pl.col("_fifo_profit_raw").alias(Col.profit))
+    else:
+        trades_df = trades_df.with_columns(pl.col("_profit_raw").alias(Col.profit))
+
+    trades_df = trades_df.filter(pl.col(Col.profit).is_not_null()).filter(pl.col(Col.profit) != 0).select(
+        Col.trade_date,
+        Col.ticker,
+        Col.currency,
+        TRADE_OPERATION_COL,
+        Col.profit,
     )
 
     if trades_df.is_empty():
@@ -374,33 +464,72 @@ def _load_trades_df(statement: dict, exchange_rates_df: pl.DataFrame, start_date
     return convert_to_euro(joined_df, col_to_convert=Col.profit)
 
 
-def _summarize_trades(trades_df: pl.DataFrame) -> pl.DataFrame | None:
+def _summarize_trades(trades_df: pl.DataFrame, separate_trade_profit_loss: bool) -> pl.DataFrame | None:
     if trades_df.is_empty():
         return None
 
     totals_df = trades_df.select(
         pl.col(Col.profit_euro).sum().fill_null(0.0).round(FLOAT_PRECISION).alias(Col.profit_euro_total),
+        pl.when(pl.col(Col.profit_euro) > 0)
+        .then(pl.col(Col.profit_euro))
+        .otherwise(0.0)
+        .sum()
+        .round(FLOAT_PRECISION)
+        .alias("trade_profit_euro_total"),
+        (-pl.when(pl.col(Col.profit_euro) < 0).then(pl.col(Col.profit_euro)).otherwise(0.0).sum())
+        .round(FLOAT_PRECISION)
+        .alias("trade_loss_euro_total"),
     ).with_columns(
         pl.col(Col.profit_euro_total).clip(lower_bound=0.0).alias("taxable_profit_euro"),
     )
 
-    trades_tax_df = calculate_kest(
+    totals_tax_df = calculate_kest(
         df=totals_df,
         amount_col="taxable_profit_euro",
         tax_withheld_col=None,
         net_col_name="taxable_profit_euro_net",
     )
 
-    return trades_tax_df.select(
-        pl.lit("trades").alias(Col.type),
+    if not separate_trade_profit_loss:
+        return totals_tax_df.select(
+            pl.lit("trades").alias(Col.type),
+            pl.lit(CurrencyCode.euro.value).alias(Col.currency),
+            pl.col(Col.profit_euro_total).alias(Col.profit_total),
+            pl.col(Col.profit_euro_total),
+            (pl.col(Col.profit_euro_total) - pl.col(Col.kest_net)).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
+            pl.lit(0.0).alias(Col.withholding_tax_euro_total),
+            pl.col(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
+            pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
+        )
+
+    summary_frames: list[pl.DataFrame] = []
+    profit_row_df = totals_tax_df.select(
+        pl.lit("trades profit").alias(Col.type),
         pl.lit(CurrencyCode.euro.value).alias(Col.currency),
-        pl.col(Col.profit_euro_total).alias(Col.profit_total),
-        pl.col(Col.profit_euro_total),
-        (pl.col(Col.profit_euro_total) - pl.col(Col.kest_net)).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
+        pl.col("trade_profit_euro_total").alias(Col.profit_total),
+        pl.col("trade_profit_euro_total").alias(Col.profit_euro_total),
+        (pl.col("trade_profit_euro_total") - pl.col(Col.kest_net)).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
         pl.lit(0.0).alias(Col.withholding_tax_euro_total),
         pl.col(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
         pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
-    )
+    ).filter(pl.col(Col.profit_euro_total) != 0)
+    if not profit_row_df.is_empty():
+        summary_frames.append(profit_row_df)
+
+    loss_row_df = totals_tax_df.select(
+        pl.lit("trades loss").alias(Col.type),
+        pl.lit(CurrencyCode.euro.value).alias(Col.currency),
+        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_total),
+        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_euro_total),
+        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
+        pl.lit(0.0).alias(Col.withholding_tax_euro_total),
+        pl.lit(0.0).alias(Col.kest_gross_total),
+        pl.lit(0.0).alias(Col.kest_net_total),
+    ).filter(pl.col(Col.profit_euro_total) != 0)
+    if not loss_row_df.is_empty():
+        summary_frames.append(loss_row_df)
+
+    return pl.concat(summary_frames, how="vertical_relaxed") if summary_frames else None
 
 
 def process_freedom_statement(
@@ -410,6 +539,7 @@ def process_freedom_statement(
     end_date: date,
     exclude_corporate_action_ids_file: str | None = None,
     incorrect_withholding_tax_output_file: str | None = None,
+    separate_trade_profit_loss: bool = True,
 ) -> pl.DataFrame:
     """
     1. Load Freedom statement sections and normalize corporate actions/trades for the reporting period.
@@ -443,7 +573,10 @@ def process_freedom_statement(
         start_date=start_date,
         end_date=end_date,
     )
-    trades_summary_df = _summarize_trades(trades_df)
+    trades_summary_df = _summarize_trades(
+        trades_df,
+        separate_trade_profit_loss=separate_trade_profit_loss,
+    )
 
     summary_frames = [df for df in [dividends_summary_df, trades_summary_df] if df is not None and not df.is_empty()]
     if not summary_frames:

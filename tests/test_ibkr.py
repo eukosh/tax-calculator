@@ -377,20 +377,8 @@ def test_process_trades_ibkr_uses_buy_and_sell_rates(tmp_path):
             Column.profit_euro: [0.0],
         }
     )
-    expected_summary_df = pl.DataFrame(
-        {
-            Column.currency: ["EUR"],
-            Column.profit_total: [0.0],
-            Column.profit_euro_total: [0.0],
-            Column.profit_euro_net_total: [0.0],
-            Column.withholding_tax_euro_total: [0.0],
-            Column.kest_gross_total: [0.0],
-            Column.kest_net_total: [0.0],
-        }
-    )
-
     assert_frame_equal(detail_df, expected_detail_df)
-    assert_frame_equal(summary_df, expected_summary_df)
+    assert summary_df is None
 
 
 def test_process_trades_ibkr_clips_taxable_profit_on_loss(tmp_path):
@@ -441,6 +429,7 @@ def test_process_trades_ibkr_clips_taxable_profit_on_loss(tmp_path):
     )
     expected_summary_df = pl.DataFrame(
         {
+            Column.type: ["trades loss"],
             Column.currency: ["EUR"],
             Column.profit_total: [-20.0],
             Column.profit_euro_total: [-20.0],
@@ -485,6 +474,100 @@ def test_process_trades_ibkr_raises_without_buy_side_rate(tmp_path):
             start_date=date(2024, 1, 1),
             end_date=date(2024, 12, 31),
         )
+
+
+def test_process_trades_ibkr_separates_realized_profit_and_loss_by_default(tmp_path):
+    xml_content = """\
+<FlexQueryResponse>
+  <FlexStatements count="1">
+    <FlexStatement>
+      <Trades>
+        <Lot symbol="AAPL" currency="USD" openDateTime="2024-01-02 10:00:00" tradeDate="2024-06-03" cost="100" fifoPnlRealized="110" />
+        <Lot symbol="MSFT" currency="USD" openDateTime="2024-02-02 10:00:00" tradeDate="2024-06-03" cost="200" fifoPnlRealized="-55" />
+      </Trades>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    xml_path = tmp_path / "trades_mixed.xml"
+    xml_path.write_text(xml_content)
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 1, 2), date(2024, 2, 2), date(2024, 6, 3)],
+            Column.currency: ["USD", "USD", "USD"],
+            Column.exchange_rate: [1.0, 1.0, 1.1],
+        }
+    )
+
+    _, summary_df = process_trades_ibkr(
+        xml_file_path=str(xml_path),
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+    )
+
+    expected_summary_df = pl.DataFrame(
+        {
+            Column.type: ["trades loss", "trades profit"],
+            Column.currency: ["EUR", "EUR"],
+            Column.profit_total: [-68.1818, 90.9091],
+            Column.profit_euro_total: [-68.1818, 90.9091],
+            Column.profit_euro_net_total: [-68.1818, 84.6591],
+            Column.withholding_tax_euro_total: [0.0, 0.0],
+            Column.kest_gross_total: [0.0, 6.25],
+            Column.kest_net_total: [0.0, 6.25],
+        }
+    ).sort(Column.type)
+
+    assert_frame_equal(summary_df.sort(Column.type), expected_summary_df)
+
+
+def test_process_trades_ibkr_can_disable_separate_profit_loss_reporting(tmp_path):
+    xml_content = """\
+<FlexQueryResponse>
+  <FlexStatements count="1">
+    <FlexStatement>
+      <Trades>
+        <Lot symbol="AAPL" currency="USD" openDateTime="2024-01-02 10:00:00" tradeDate="2024-06-03" cost="100" fifoPnlRealized="110" />
+        <Lot symbol="MSFT" currency="USD" openDateTime="2024-02-02 10:00:00" tradeDate="2024-06-03" cost="200" fifoPnlRealized="-55" />
+      </Trades>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    xml_path = tmp_path / "trades_mixed_legacy.xml"
+    xml_path.write_text(xml_content)
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 1, 2), date(2024, 2, 2), date(2024, 6, 3)],
+            Column.currency: ["USD", "USD", "USD"],
+            Column.exchange_rate: [1.0, 1.0, 1.1],
+        }
+    )
+
+    _, summary_df = process_trades_ibkr(
+        xml_file_path=str(xml_path),
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        separate_trade_profit_loss=False,
+    )
+
+    expected_summary_df = pl.DataFrame(
+        {
+            Column.currency: ["EUR"],
+            Column.profit_total: [22.7273],
+            Column.profit_euro_total: [22.7273],
+            Column.profit_euro_net_total: [16.4773],
+            Column.withholding_tax_euro_total: [0.0],
+            Column.kest_gross_total: [6.25],
+            Column.kest_net_total: [6.25],
+        }
+    )
+
+    assert_frame_equal(summary_df, expected_summary_df)
 
 
 def test_calculate_summary_ibkr_rejects_duplicate_sections(dividends_country_summary_df):

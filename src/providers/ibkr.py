@@ -101,6 +101,7 @@ def process_trades_ibkr(
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
+    separate_trade_profit_loss: bool = True,
 ) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
     """
     1. Load closed trade lots from XML and keep only fields needed for tax math.
@@ -179,6 +180,15 @@ def process_trades_ibkr(
 
     trades_totals_df = trades_detail_df.select(
         pl.col(Col.profit_euro).sum().fill_null(0.0).round(FLOAT_PRECISION).alias(Col.profit_euro_total),
+        pl.when(pl.col(Col.profit_euro) > 0)
+        .then(pl.col(Col.profit_euro))
+        .otherwise(0.0)
+        .sum()
+        .round(FLOAT_PRECISION)
+        .alias("trade_profit_euro_total"),
+        (-pl.when(pl.col(Col.profit_euro) < 0).then(pl.col(Col.profit_euro)).otherwise(0.0).sum())
+        .round(FLOAT_PRECISION)
+        .alias("trade_loss_euro_total"),
     ).with_columns(
         pl.col(Col.profit_euro_total).alias(Col.profit_total),
         pl.col(Col.profit_euro_total).clip(lower_bound=0.0).alias("taxable_profit_euro"),
@@ -191,15 +201,46 @@ def process_trades_ibkr(
         net_col_name="taxable_profit_euro_net",
     )
 
-    trades_summary_df = trades_tax_df.select(
+    if not separate_trade_profit_loss:
+        trades_summary_df = trades_tax_df.select(
+            pl.lit(CurrencyCode.euro.value).alias(Col.currency),
+            pl.col(Col.profit_total),
+            pl.col(Col.profit_euro_total),
+            (pl.col(Col.profit_euro_total) - pl.col(Col.kest_net)).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
+            pl.lit(0.0).alias(Col.withholding_tax_euro_total),
+            pl.col(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
+            pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
+        )
+        return trades_detail_df, trades_summary_df
+
+    summary_frames: list[pl.DataFrame] = []
+    profit_row_df = trades_tax_df.select(
+        pl.lit("trades profit").alias(Col.type),
         pl.lit(CurrencyCode.euro.value).alias(Col.currency),
-        pl.col(Col.profit_total),
-        pl.col(Col.profit_euro_total),
-        (pl.col(Col.profit_euro_total) - pl.col(Col.kest_net)).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
+        pl.col("trade_profit_euro_total").alias(Col.profit_total),
+        pl.col("trade_profit_euro_total").alias(Col.profit_euro_total),
+        (pl.col("trade_profit_euro_total") - pl.col(Col.kest_net)).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
         pl.lit(0.0).alias(Col.withholding_tax_euro_total),
         pl.col(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
         pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
-    )
+    ).filter(pl.col(Col.profit_euro_total) != 0)
+    if not profit_row_df.is_empty():
+        summary_frames.append(profit_row_df)
+
+    loss_row_df = trades_tax_df.select(
+        pl.lit("trades loss").alias(Col.type),
+        pl.lit(CurrencyCode.euro.value).alias(Col.currency),
+        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_total),
+        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_euro_total),
+        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
+        pl.lit(0.0).alias(Col.withholding_tax_euro_total),
+        pl.lit(0.0).alias(Col.kest_gross_total),
+        pl.lit(0.0).alias(Col.kest_net_total),
+    ).filter(pl.col(Col.profit_euro_total) != 0)
+    if not loss_row_df.is_empty():
+        summary_frames.append(loss_row_df)
+
+    trades_summary_df = pl.concat(summary_frames, how="vertical_relaxed") if summary_frames else None
 
     return trades_detail_df, trades_summary_df
 
@@ -437,7 +478,9 @@ def calculate_summary_ibkr(
             pl.col(withholding_col).sum().round(FLOAT_PRECISION) if withholding_col else pl.lit(0.0)
         ).alias(Col.withholding_tax_euro_total)
 
-        section_summary_df = section.df.group_by(pl.lit(config["label"]).alias(Col.type), Col.currency).agg(
+        label_expr = pl.col(Col.type) if Col.type in section.df.columns else pl.lit(config["label"])
+
+        section_summary_df = section.df.group_by(label_expr.alias(Col.type), Col.currency).agg(
             pl.col(Col.profit_total).sum().round(FLOAT_PRECISION).alias(Col.profit_total),
             pl.col(config["profit_euro_col"]).sum().round(FLOAT_PRECISION).alias(Col.profit_euro_total),
             pl.col(config["profit_euro_net_col"]).sum().round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),

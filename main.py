@@ -42,6 +42,8 @@ if __name__ == "__main__":
     reporting_end_date = date(2025, 12, 31)
     # reporting_start_date = date(2024, 1, 1)
     # reporting_end_date = date(2024, 12, 31)
+    ibkr_calculate_trade_profit_loss_separately = True
+    freedom_calculate_trade_profit_loss_separately = True
 
     logging.info(f"Reporting dates: {reporting_start_date} - {reporting_end_date}")
 
@@ -73,6 +75,7 @@ if __name__ == "__main__":
         exchange_rates_df=rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
+        separate_trade_profit_loss=ibkr_calculate_trade_profit_loss_separately,
     )
     dividends_country_agg_df, reit_divs_agg_df = process_cash_transactions_ibkr(
         xml_file_path=ibkr_input_path,
@@ -178,6 +181,7 @@ if __name__ == "__main__":
         end_date=reporting_end_date,
         exclude_corporate_action_ids_file=exclusion_file_path if Path(exclusion_file_path).exists() else None,
         incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
+        separate_trade_profit_loss=freedom_calculate_trade_profit_loss_separately,
     )
     ff_writer = PolarsWriter(
         output_dir=f"data/output/{person}/freedom",

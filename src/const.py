@@ -50,6 +50,8 @@ class Column(StrEnum):
     profit_euro_net_total = auto()
     profit_euro_total = auto()
     profit_total = auto()
+    realized_loss_euro_total = auto()
+    realized_profit_euro_total = auto()
     rate_date = auto()
     shares_count = auto()
     ticker = auto()
@@ -96,6 +98,14 @@ COL_REPR_MAP = {
     Column.profit_euro_net_total: ColumnRepr(
         name="Net Profit",
         description="Total approximate NET profit in EUR, it accounts for withholding tax and Austrian tax that is to be paid.",
+    ),
+    Column.realized_profit_euro_total: ColumnRepr(
+        name="Realized Trade Profit",
+        description="Sum of profitable trade lots in EUR before offsetting losses. Useful for Austrian foreign capital income reporting.",
+    ),
+    Column.realized_loss_euro_total: ColumnRepr(
+        name="Realized Trade Loss",
+        description="Absolute sum of loss-making trade lots in EUR before offsetting against profitable lots.",
     ),
     Column.withholding_tax_euro_total: ColumnRepr(
         name="Withholding Tax", description="Total tax withheld at the source in EUR."

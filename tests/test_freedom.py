@@ -115,6 +115,39 @@ def _statement_path(tmp_path: Path, corporate_actions: list[dict], trades: list[
     return str(path)
 
 
+def _stock_award(*, ticker: str, quantity: float, date_time: str, transaction_id: int = 10) -> dict:
+    return {
+        "type": "stock_award",
+        "ticker": ticker,
+        "quantity": f"{quantity:.8f}",
+        "date_created": f"{date_time}.000000",
+        "datetime": date_time,
+        "transaction_id": transaction_id,
+        "cost": "0.00000000",
+        "fifo_profit": "0.00000000",
+        "commission": "0.00000000",
+        "commission_currency": None,
+        "comment": "Promo stock",
+    }
+
+
+def _statement_path_with_awards(
+    tmp_path: Path,
+    corporate_actions: list[dict],
+    trades: list[dict] | None = None,
+    awards: list[dict] | None = None,
+) -> str:
+    statement = {"corporate_actions": {"detailed": corporate_actions}}
+    if trades is not None:
+        statement["trades"] = {"detailed": trades}
+    if awards is not None:
+        statement["securities_in_outs"] = awards
+
+    path = tmp_path / "freedom_statement.json"
+    path.write_text(json.dumps(statement))
+    return str(path)
+
+
 def test_process_freedom_statement_uses_ex_date_for_fx_matching(tmp_path):
     rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0))
     statement_path = _statement_path(
@@ -316,11 +349,11 @@ def test_process_freedom_statement_includes_trade_summary(
         start_date=REPORTING_PERIOD_START_DATE,
         end_date=REPORTING_PERIOD_END_DATE,
     )
-    trades_df = res_df.filter(pl.col(Column.type) == "trades")
+    trades_df = res_df.filter(pl.col(Column.type).str.starts_with("trades"))
 
     expected_df = pl.DataFrame(
         {
-            Column.type: ["trades"],
+            Column.type: ["trades profit" if expected_profit_euro_total >= 0 else "trades loss"],
             Column.currency: ["EUR"],
             Column.profit_total: [expected_profit_euro_total],
             Column.profit_euro_total: [expected_profit_euro_total],
@@ -335,7 +368,56 @@ def test_process_freedom_statement_includes_trade_summary(
     assert_frame_equal(trades_df, expected_df)
 
 
-def test_process_freedom_statement_uses_profit_when_fifo_profit_is_zero(tmp_path):
+def test_process_freedom_statement_uses_profit_when_fifo_profit_is_zero_for_award_shares(tmp_path):
+    rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0), (date(2024, 6, 10), "USD", 1.1))
+    statement_path = _statement_path_with_awards(
+        tmp_path=tmp_path,
+        corporate_actions=[],
+        trades=[
+            {
+                **_trade(
+                    short_date="2024-06-10",
+                    operation="sell",
+                    instr_nm="AAPL.US",
+                    curr_c="USD",
+                    fifo_profit="0.00000000",
+                ),
+                "profit": 110.0,
+            },
+        ],
+        awards=[
+            _stock_award(
+                ticker="AAPL.US",
+                quantity=1,
+                date_time="2024-06-09 10:00:00",
+            )
+        ],
+    )
+
+    res_df = process_freedom_statement(
+        statement_path,
+        rates_df,
+        start_date=REPORTING_PERIOD_START_DATE,
+        end_date=REPORTING_PERIOD_END_DATE,
+    )
+
+    expected_df = pl.DataFrame(
+        {
+            Column.type: ["trades profit"],
+            Column.currency: ["EUR"],
+            Column.profit_total: [100.0],
+            Column.profit_euro_total: [100.0],
+            Column.profit_euro_net_total: [72.5],
+            Column.withholding_tax_euro_total: [0.0],
+            Column.kest_gross_total: [27.5],
+            Column.kest_net_total: [27.5],
+        }
+    )
+
+    assert_frame_equal(res_df, expected_df)
+
+
+def test_process_freedom_statement_ignores_profit_when_fifo_profit_is_zero_without_award_match(tmp_path):
     rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0), (date(2024, 6, 10), "USD", 1.1))
     statement_path = _statement_path(
         tmp_path=tmp_path,
@@ -361,16 +443,96 @@ def test_process_freedom_statement_uses_profit_when_fifo_profit_is_zero(tmp_path
         end_date=REPORTING_PERIOD_END_DATE,
     )
 
+    assert res_df.is_empty()
+
+
+def test_process_freedom_statement_separates_trade_profit_and_loss_by_default(tmp_path):
+    rates_df = _rates_df((date(2024, 6, 10), "USD", 1.1))
+    statement_path = _statement_path(
+        tmp_path=tmp_path,
+        corporate_actions=[],
+        trades=[
+            _trade(
+                short_date="2024-06-10",
+                operation="sell",
+                instr_nm="AAPL.US",
+                curr_c="USD",
+                fifo_profit="110.0",
+            ),
+            _trade(
+                short_date="2024-06-10",
+                operation="sell",
+                instr_nm="MSFT.US",
+                curr_c="USD",
+                fifo_profit="-55.0",
+            ),
+        ],
+    )
+
+    res_df = process_freedom_statement(
+        statement_path,
+        rates_df,
+        start_date=REPORTING_PERIOD_START_DATE,
+        end_date=REPORTING_PERIOD_END_DATE,
+    )
+
+    expected_df = pl.DataFrame(
+        {
+            Column.type: ["trades loss", "trades profit"],
+            Column.currency: ["EUR", "EUR"],
+            Column.profit_total: [-50.0, 100.0],
+            Column.profit_euro_total: [-50.0, 100.0],
+            Column.profit_euro_net_total: [-50.0, 86.25],
+            Column.withholding_tax_euro_total: [0.0, 0.0],
+            Column.kest_gross_total: [0.0, 13.75],
+            Column.kest_net_total: [0.0, 13.75],
+        }
+    ).sort(Column.type)
+
+    assert_frame_equal(res_df.sort(Column.type), expected_df)
+
+
+def test_process_freedom_statement_can_disable_separate_trade_profit_loss_reporting(tmp_path):
+    rates_df = _rates_df((date(2024, 6, 10), "USD", 1.1))
+    statement_path = _statement_path(
+        tmp_path=tmp_path,
+        corporate_actions=[],
+        trades=[
+            _trade(
+                short_date="2024-06-10",
+                operation="sell",
+                instr_nm="AAPL.US",
+                curr_c="USD",
+                fifo_profit="110.0",
+            ),
+            _trade(
+                short_date="2024-06-10",
+                operation="sell",
+                instr_nm="MSFT.US",
+                curr_c="USD",
+                fifo_profit="-55.0",
+            ),
+        ],
+    )
+
+    res_df = process_freedom_statement(
+        statement_path,
+        rates_df,
+        start_date=REPORTING_PERIOD_START_DATE,
+        end_date=REPORTING_PERIOD_END_DATE,
+        separate_trade_profit_loss=False,
+    )
+
     expected_df = pl.DataFrame(
         {
             Column.type: ["trades"],
             Column.currency: ["EUR"],
-            Column.profit_total: [100.0],
-            Column.profit_euro_total: [100.0],
-            Column.profit_euro_net_total: [72.5],
+            Column.profit_total: [50.0],
+            Column.profit_euro_total: [50.0],
+            Column.profit_euro_net_total: [36.25],
             Column.withholding_tax_euro_total: [0.0],
-            Column.kest_gross_total: [27.5],
-            Column.kest_net_total: [27.5],
+            Column.kest_gross_total: [13.75],
+            Column.kest_net_total: [13.75],
         }
     )
 
