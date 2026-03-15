@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import date
-from typing import List, TypedDict
+from typing import List
 
 import polars as pl
 from reportlab.lib import colors
@@ -9,18 +9,23 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer, Table
 
-from src.const import COL_REPR_MAP, FLOAT_PRECISION, Column
-from src.exceptions import MissingColumnException
+from src.const import Column, get_column_repr
 
 styles = getSampleStyleSheet()
-
-
-class SummarySection(TypedDict):
-    Column.profit_euro_total: float
-    Column.profit_euro_net_total: float
-    Column.withholding_tax_euro_total: float
-    Column.kest_gross_total: float
-    Column.kest_net_total: float
+FINANZONLINE_NOTES = [
+    "The FinanzOnline helper and tax estimate are capital-income-only views. "
+    "They do not include other tax-return items such as donations, so the overall FinanzOnline "
+    "pre-calculation can differ.",
+    "Foreign tax withheld = sum of actual foreign tax withheld by brokers.",
+    "Preliminary creditable foreign tax before loss offset = "
+    "sum(min(withheld tax per payment, treaty cap per payment)). "
+    "For the currently supported dividend/distribution rows, the treaty cap is generally 15% of gross income.",
+    "Final creditable foreign tax uses favorable loss allocation: losses are applied first to "
+    "positive income buckets with the lowest foreign-tax-credit ratio.",
+    "Total tax base 27.5% = max(capital income + ETF/REIT distributions + trade profits + trade losses, 0).",
+    "Estimated Austrian tax = max(total tax base * 27.5% - final creditable foreign tax, 0).",
+    "Detailed formulas and decision rules are documented in docs/.",
+]
 
 
 @dataclass
@@ -29,8 +34,8 @@ class ReportSection:
     df: pl.DataFrame
 
 
-def create_table_from_df(df: pl.DataFrame):
-    columns = [COL_REPR_MAP.get(col).name for col in df.columns]
+def create_table_from_df(df: pl.DataFrame) -> Table:
+    columns = [col_repr.name if (col_repr := get_column_repr(col)) is not None else col for col in df.columns]
     table_data = [columns] + df.to_numpy().tolist()
 
     table = Table(table_data)
@@ -54,18 +59,9 @@ def create_table_from_df(df: pl.DataFrame):
     return table
 
 
-def add_summary_stats_from_df(current_stats: SummarySection, df: pl.DataFrame) -> SummarySection:
-    missing_columns = set(current_stats.keys()) - set(df.columns)
-    if missing_columns:
-        raise MissingColumnException(f"Missing required columns: {', '.join(missing_columns)}")
-    for col in current_stats.keys():
-        current_stats[col] += df[col].sum()
-    return current_stats
-
-
 def create_tax_report(
     sections: List[ReportSection], output_path: str, start_date: date, end_date: date, title: str = "Tax Report"
-):
+) -> None:
     pdf = SimpleDocTemplate(
         output_path, pagesize=A4, leftMargin=1 * cm, rightMargin=0.5 * cm, topMargin=1 * cm, bottomMargin=0.5 * cm
     )
@@ -76,54 +72,44 @@ def create_tax_report(
         Paragraph(f"Reporting period: <b>{start_date}</b> to <b>{end_date}</b>", styles["Normal"]),
         space,
     ]
-    total_stats: SummarySection = {
-        Column.profit_euro_total: 0,
-        Column.profit_euro_net_total: 0,
-        Column.withholding_tax_euro_total: 0,
-        Column.kest_gross_total: 0,
-        Column.kest_net_total: 0,
-    }
-    legend_items = {}
+    legend_items: dict[str, ListItem] = {}
     for section in sections:
         elements.append(Paragraph(section.title, styles["Heading1"]))
         elements.append(create_table_from_df(section.df))
         elements.append(space)
 
-        total_stats = add_summary_stats_from_df(total_stats, section.df)
         for col in section.df.columns:
             if col in legend_items:
                 continue
-            col_repr = COL_REPR_MAP.get(col)
+            col_repr = get_column_repr(col)
             if col_repr:
                 legend_items[col] = ListItem(
-                    Paragraph(f"<b>{COL_REPR_MAP[col].name}</b>: {col_repr.description}", styles["Normal"]),
+                    Paragraph(f"<b>{col_repr.name}</b>: {col_repr.description}", styles["Normal"]),
                     bulletText="•",
                 )
 
-    elements.append(Paragraph("Summary", styles["Heading1"]))
-    total_stats = {k: round(v, FLOAT_PRECISION) for k, v in total_stats.items()}
-    elements.append(
-        Paragraph(
-            "<br/>".join(f"<b>{COL_REPR_MAP[k].name}</b>: {v} €" for k, v in total_stats.items()), styles["Normal"]
-        )
-    )
-    elements.append(Spacer(1, 12))
-    elements.append(Paragraph("Glossary", styles["Heading1"]))
-    elements.append(ListFlowable(legend_items.values(), bulletType="bullet"))
-
     has_trades_row = any(
-        (Column.type in section.df.columns)
-        and section.df.filter(pl.col(Column.type).cast(pl.String).str.starts_with("trades")).height > 0
+        (Column.type.value in section.df.columns)
+        and section.df.filter(pl.col(Column.type.value).cast(pl.String).str.starts_with("trades")).height > 0
         for section in sections
     )
     if has_trades_row:
         elements.append(Spacer(1, 8))
-        elements.append(
-            Paragraph(
-                "* Note: Trade rows are converted to EUR at processing time "
-                "(buy-date FX for cost, sell-date FX for proceeds) and then aggregated in EUR. "
-                "So trade profit/loss rows are shown in EUR.",
-                styles["Normal"],
-            )
+        trade_note = (
+            "Trade rows are converted to EUR at processing time "
+            "(buy-date FX for cost, sell-date FX for proceeds) and then aggregated in EUR. "
+            "So trade profit/loss rows are shown in EUR."
         )
+        elements.append(Paragraph(f"* Note: {trade_note}", styles["Normal"]))
+
+    has_finanzonline_section = any(section.title == "FinanzOnline Helper" for section in sections)
+    if has_finanzonline_section:
+        elements.append(Spacer(1, 8))
+        for note in FINANZONLINE_NOTES:
+            elements.append(Paragraph(f"* Note: {note}", styles["Normal"]))
+
+    if legend_items:
+        elements.append(Spacer(1, 12))
+        elements.append(Paragraph("Glossary", styles["Heading1"]))
+        elements.append(ListFlowable(list(legend_items.values()), bulletType="bullet"))
     pdf.build(elements)

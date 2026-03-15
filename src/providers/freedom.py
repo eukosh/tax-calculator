@@ -7,12 +7,29 @@ import polars as pl
 from src.const import FLOAT_PRECISION, CurrencyCode
 from src.const import Column as Col
 from src.const import CorporateActionTypesFF
-from src.utils import calculate_kest, convert_to_euro, join_exchange_rates, read_json
+from src.finanzonline import (
+    BUCKET_AMOUNT_EUR_COL,
+    BUCKET_CATEGORY_COL,
+    BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL,
+    BUCKET_LABEL_COL,
+    BUCKET_SCHEMA,
+    BUCKET_SOURCE_COL,
+    BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL,
+    ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY,
+    ORDINARY_INCOME_BUCKET_CATEGORY,
+    empty_finanzonline_bucket_df,
+)
+from src.utils import build_separate_trade_profit_loss_rows, calculate_kest, convert_to_euro, join_exchange_rates, read_json
 
 EMPTY_VALUE = "-"
 EX_DATE_COL = "ex_date"
 TRADE_OPERATION_COL = "operation"
 ABS_EPSILON = 1e-9
+DIVIDEND_TYPE_MAPPING_ALLOWED = {"dividends", "reit_dividends"}
+DIVIDEND_SUMMARY_TYPE_LABELS = {
+    "dividends": "dividends",
+    "reit_dividends": "ETF/REIT div",
+}
 
 TICKERS_WITHHOLDING_ZERO_TAX = ["TLT.US"]
 
@@ -234,6 +251,60 @@ def _apply_dividend_exclusions(dividends_df: pl.DataFrame, exclude_file_path: st
     return filtered_df
 
 
+def _load_dividend_type_mapping(mapping_file_path: str | None) -> dict[str, str] | None:
+    if mapping_file_path is None:
+        return None
+
+    mapping_path = Path(mapping_file_path)
+    if not mapping_path.exists():
+        raise FileNotFoundError(f"Dividend type mapping file does not exist: {mapping_file_path}")
+
+    mapping_df = pl.read_csv(mapping_path)
+    required_columns = {"ticker", "type"}
+    if not required_columns.issubset(set(mapping_df.columns)):
+        raise ValueError("Dividend type mapping file must include ticker and type columns")
+
+    mapping_df = mapping_df.select(
+        pl.col("ticker").cast(pl.String).str.strip_chars().alias("ticker"),
+        pl.col("type").cast(pl.String).str.strip_chars().alias("type"),
+    )
+
+    if mapping_df["ticker"].n_unique() != mapping_df.height:
+        raise ValueError("Dividend type mapping file contains duplicate tickers")
+
+    invalid_types = sorted(set(mapping_df["type"].to_list()) - DIVIDEND_TYPE_MAPPING_ALLOWED)
+    if invalid_types:
+        raise ValueError(
+            f"Unsupported dividend type mapping values: {invalid_types}. "
+            f"Allowed values: {sorted(DIVIDEND_TYPE_MAPPING_ALLOWED)}"
+        )
+
+    return dict(zip(mapping_df["ticker"].to_list(), mapping_df["type"].to_list(), strict=True))
+
+
+def _assign_dividend_summary_type(dividends_df: pl.DataFrame, dividend_type_mapping: dict[str, str] | None) -> pl.DataFrame:
+    if dividends_df.is_empty() or dividend_type_mapping is None:
+        return dividends_df.with_columns(pl.lit("dividends").alias("_summary_type"))
+
+    mapped_df = dividends_df.with_columns(
+        pl.col(Col.ticker)
+        .replace_strict(dividend_type_mapping, default=None, return_dtype=pl.String)
+        .alias("_mapped_dividend_type")
+    )
+
+    unmapped_tickers = (
+        mapped_df.filter(pl.col("_mapped_dividend_type").is_null())[Col.ticker].unique(maintain_order=True).to_list()
+    )
+    if unmapped_tickers:
+        raise ValueError(f"Unmapped Freedom dividend tickers: {unmapped_tickers}")
+
+    return mapped_df.with_columns(
+        pl.col("_mapped_dividend_type")
+        .replace_strict(DIVIDEND_SUMMARY_TYPE_LABELS, return_dtype=pl.String)
+        .alias("_summary_type")
+    ).drop("_mapped_dividend_type")
+
+
 def _prepare_dividends_df(
     corporate_actions_df: pl.DataFrame,
     exclude_corporate_action_ids_file: str | None,
@@ -266,10 +337,42 @@ def _summarize_dividends(
     dividends_df: pl.DataFrame,
     exchange_rates_df: pl.DataFrame,
     incorrect_withholding_tax_output_file: str | None,
+    dividend_type_mapping: dict[str, str] | None,
+) -> pl.DataFrame | None:
+    tax_df = _build_dividend_tax_df(
+        dividends_df=dividends_df,
+        exchange_rates_df=exchange_rates_df,
+        incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
+        dividend_type_mapping=dividend_type_mapping,
+    )
+    if tax_df is None:
+        return None
+
+    return (
+        tax_df.group_by("_summary_type", Col.currency)
+        .agg(
+            pl.sum(Col.amount).round(FLOAT_PRECISION).alias(Col.profit_total),
+            pl.sum(Col.amount_euro).round(FLOAT_PRECISION).alias(Col.profit_euro_total),
+            pl.sum(Col.amount_euro_net).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
+            pl.sum(Col.withholding_tax_euro).round(FLOAT_PRECISION).alias(Col.withholding_tax_euro_total),
+            pl.sum(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
+            pl.sum(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
+        )
+        .rename({"_summary_type": Col.type})
+        .select(SUMMARY_COLUMNS)
+    )
+
+
+def _build_dividend_tax_df(
+    dividends_df: pl.DataFrame,
+    exchange_rates_df: pl.DataFrame,
+    incorrect_withholding_tax_output_file: str | None,
+    dividend_type_mapping: dict[str, str] | None,
 ) -> pl.DataFrame | None:
     if dividends_df.is_empty():
         return None
 
+    dividends_df = _assign_dividend_summary_type(dividends_df, dividend_type_mapping)
     incorrect_withholding_df = dividends_df.filter(
         pl.col(Col.ticker).is_in(TICKERS_WITHHOLDING_ZERO_TAX) & (pl.col(Col.withholding_tax) != 0)
     )
@@ -296,21 +399,60 @@ def _summarize_dividends(
         df_date_col=EX_DATE_COL,
     )
     joined_df = convert_to_euro(joined_df, col_to_convert=[Col.amount, Col.withholding_tax])
-    tax_df = calculate_kest(joined_df, amount_col=Col.amount_euro, tax_withheld_col=Col.withholding_tax_euro)
+    return calculate_kest(joined_df, amount_col=Col.amount_euro, tax_withheld_col=Col.withholding_tax_euro)
 
-    return (
-        tax_df.group_by(Col.currency)
-        .agg(
-            pl.sum(Col.amount).round(FLOAT_PRECISION).alias(Col.profit_total),
-            pl.sum(Col.amount_euro).round(FLOAT_PRECISION).alias(Col.profit_euro_total),
-            pl.sum(Col.amount_euro_net).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
-            pl.sum(Col.withholding_tax_euro).round(FLOAT_PRECISION).alias(Col.withholding_tax_euro_total),
-            pl.sum(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
-            pl.sum(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
-        )
-        .with_columns(pl.lit("dividends").alias(Col.type))
-        .select(SUMMARY_COLUMNS)
+
+def build_finanzonline_dividend_buckets_freedom(
+    json_file_path: str,
+    exchange_rates_df: pl.DataFrame,
+    start_date: date,
+    end_date: date,
+    exclude_corporate_action_ids_file: str | None = None,
+    incorrect_withholding_tax_output_file: str | None = None,
+    dividend_type_mapping_file: str | None = None,
+) -> pl.DataFrame:
+    statement = read_json(json_file_path)
+    corporate_actions_df = _load_corporate_actions_df(
+        statement=statement,
+        start_date=start_date,
+        end_date=end_date,
     )
+    dividend_type_mapping = _load_dividend_type_mapping(dividend_type_mapping_file)
+    dividends_df = _prepare_dividends_df(
+        corporate_actions_df=corporate_actions_df,
+        exclude_corporate_action_ids_file=exclude_corporate_action_ids_file,
+    )
+    tax_df = _build_dividend_tax_df(
+        dividends_df=dividends_df,
+        exchange_rates_df=exchange_rates_df,
+        incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
+        dividend_type_mapping=dividend_type_mapping,
+    )
+    if tax_df is None or tax_df.is_empty():
+        return empty_finanzonline_bucket_df()
+
+    return tax_df.select(
+        pl.lit("freedom").alias(BUCKET_SOURCE_COL),
+        pl.concat_str(
+            [
+                pl.lit("dividend:"),
+                pl.col(EX_DATE_COL).cast(pl.String),
+                pl.lit(":"),
+                pl.col(Col.ticker),
+                pl.lit(":"),
+                pl.col(Col.corporate_action_id),
+            ]
+        ).alias(BUCKET_LABEL_COL),
+        pl.when(pl.col("_summary_type") == "ETF/REIT div")
+        .then(pl.lit(ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY))
+        .otherwise(pl.lit(ORDINARY_INCOME_BUCKET_CATEGORY))
+        .alias(BUCKET_CATEGORY_COL),
+        pl.col(Col.amount_euro).alias(BUCKET_AMOUNT_EUR_COL),
+        pl.col(Col.withholding_tax_euro).alias(BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL),
+        (pl.col(Col.kest_gross) - pl.col(Col.kest_net))
+        .clip(lower_bound=0.0)
+        .alias(BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL),
+    ).cast(BUCKET_SCHEMA)
 
 
 def _load_stock_awards_df(statement: dict) -> pl.DataFrame:
@@ -483,14 +625,13 @@ def _summarize_trades(trades_df: pl.DataFrame, separate_trade_profit_loss: bool)
         pl.col(Col.profit_euro_total).clip(lower_bound=0.0).alias("taxable_profit_euro"),
     )
 
-    totals_tax_df = calculate_kest(
-        df=totals_df,
-        amount_col="taxable_profit_euro",
-        tax_withheld_col=None,
-        net_col_name="taxable_profit_euro_net",
-    )
-
     if not separate_trade_profit_loss:
+        totals_tax_df = calculate_kest(
+            df=totals_df,
+            amount_col="taxable_profit_euro",
+            tax_withheld_col=None,
+            net_col_name="taxable_profit_euro_net",
+        )
         return totals_tax_df.select(
             pl.lit("trades").alias(Col.type),
             pl.lit(CurrencyCode.euro.value).alias(Col.currency),
@@ -502,33 +643,7 @@ def _summarize_trades(trades_df: pl.DataFrame, separate_trade_profit_loss: bool)
             pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
         )
 
-    summary_frames: list[pl.DataFrame] = []
-    profit_row_df = totals_tax_df.select(
-        pl.lit("trades profit").alias(Col.type),
-        pl.lit(CurrencyCode.euro.value).alias(Col.currency),
-        pl.col("trade_profit_euro_total").alias(Col.profit_total),
-        pl.col("trade_profit_euro_total").alias(Col.profit_euro_total),
-        (pl.col("trade_profit_euro_total") - pl.col(Col.kest_net)).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
-        pl.lit(0.0).alias(Col.withholding_tax_euro_total),
-        pl.col(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
-        pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
-    ).filter(pl.col(Col.profit_euro_total) != 0)
-    if not profit_row_df.is_empty():
-        summary_frames.append(profit_row_df)
-
-    loss_row_df = totals_tax_df.select(
-        pl.lit("trades loss").alias(Col.type),
-        pl.lit(CurrencyCode.euro.value).alias(Col.currency),
-        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_total),
-        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_euro_total),
-        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
-        pl.lit(0.0).alias(Col.withholding_tax_euro_total),
-        pl.lit(0.0).alias(Col.kest_gross_total),
-        pl.lit(0.0).alias(Col.kest_net_total),
-    ).filter(pl.col(Col.profit_euro_total) != 0)
-    if not loss_row_df.is_empty():
-        summary_frames.append(loss_row_df)
-
+    summary_frames = build_separate_trade_profit_loss_rows(totals_df)
     return pl.concat(summary_frames, how="vertical_relaxed") if summary_frames else None
 
 
@@ -539,6 +654,7 @@ def process_freedom_statement(
     end_date: date,
     exclude_corporate_action_ids_file: str | None = None,
     incorrect_withholding_tax_output_file: str | None = None,
+    dividend_type_mapping_file: str | None = None,
     separate_trade_profit_loss: bool = True,
 ) -> pl.DataFrame:
     """
@@ -557,6 +673,7 @@ def process_freedom_statement(
         start_date=start_date,
         end_date=end_date,
     )
+    dividend_type_mapping = _load_dividend_type_mapping(dividend_type_mapping_file)
     dividends_df = _prepare_dividends_df(
         corporate_actions_df=corporate_actions_df,
         exclude_corporate_action_ids_file=exclude_corporate_action_ids_file,
@@ -565,6 +682,7 @@ def process_freedom_statement(
         dividends_df=dividends_df,
         exchange_rates_df=exchange_rates_df,
         incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
+        dividend_type_mapping=dividend_type_mapping,
     )
 
     trades_df = _load_trades_df(

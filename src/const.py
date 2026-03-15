@@ -87,7 +87,7 @@ class ColumnRepr:
     description: str
 
 
-COL_REPR_MAP = {
+COL_REPR_MAP: dict[Column, ColumnRepr] = {
     Column.currency: ColumnRepr(name="Currency", description="Initial currency of the security."),
     Column.type: ColumnRepr(
         name="Type",
@@ -123,3 +123,10 @@ COL_REPR_MAP = {
         description="Country code of the issuer of the security.",
     ),
 }
+
+
+def get_column_repr(column_name: str) -> ColumnRepr | None:
+    try:
+        return COL_REPR_MAP[Column(column_name)]
+    except ValueError:
+        return None

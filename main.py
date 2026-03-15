@@ -6,10 +6,16 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 
 from src.currencies import ExchangeRates, ExchangeRatesCacheError
+from src.finanzonline import (
+    build_finanzonline_buckets_from_summary_df,
+    build_finanzonline_report,
+    empty_finanzonline_bucket_df,
+)
 from src.pdf.tax_report import ReportSection, create_tax_report
-from src.providers.freedom import process_freedom_statement
+from src.providers.freedom import build_finanzonline_dividend_buckets_freedom, process_freedom_statement
 from src.providers.ibkr import (
     IbkrSummarySection,
+    build_finanzonline_dividend_buckets_ibkr,
     calculate_summary_ibkr,
     process_bonds_ibkr,
     process_cash_transactions_ibkr,
@@ -18,7 +24,7 @@ from src.providers.ibkr import (
 from src.providers.revolut import process_revolut_savings_statement
 from src.providers.wise import process_wise_statement
 from src.utils import has_rows
-from src.writer import PolarsWriter
+from src.writer import ReportRunLayout
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -35,17 +41,22 @@ freedom_input_path = (
     else "data/input/eugene/2025/freedom_2024-12-31 23_59_59_2025-12-31 23_59_59_all.json"
 )
 
+
+def _existing_path_or_none(file_path: str) -> str | None:
+    return file_path if Path(file_path).exists() else None
+
 if __name__ == "__main__":
     pl.Config.set_tbl_rows(100)
     pl.Config.set_tbl_cols(100)
     reporting_start_date = date(2025, 1, 1)
     reporting_end_date = date(2025, 12, 31)
-    # reporting_start_date = date(2024, 1, 1)
-    # reporting_end_date = date(2024, 12, 31)
     ibkr_calculate_trade_profit_loss_separately = True
     freedom_calculate_trade_profit_loss_separately = True
 
     logging.info(f"Reporting dates: {reporting_start_date} - {reporting_end_date}")
+
+    run_name = f"tax_report_{person}_{reporting_start_date}_{reporting_end_date}"
+    run_layout = ReportRunLayout.create(base_output_dir=f"data/output/{person}", run_name=run_name)
 
     now = datetime.now(tz=UTC)
     rates_start_date = date(year=now.year - 3, month=1, day=1)
@@ -68,6 +79,7 @@ if __name__ == "__main__":
     rates_df = exchange_rates.get_rates()
 
     report_sections: list[ReportSection] = []
+    wise_summary_df: pl.DataFrame | None = None
 
     # ------- IBKR
     trades_tax_df, trades_summary_df = process_trades_ibkr(
@@ -92,11 +104,7 @@ if __name__ == "__main__":
         end_date=reporting_end_date,
     )
 
-    ibkr_writer = PolarsWriter(
-        output_dir=f"data/output/{person}/ibkr",
-        report_start_date=reporting_start_date,
-        report_end_date=reporting_end_date,
-    )
+    ibkr_writer = run_layout.writer("ibkr", reporting_start_date, reporting_end_date)
 
     if has_rows(dividends_country_agg_df):
         ibkr_writer.write_csv(dividends_country_agg_df, "dividends_country_agg.csv")
@@ -107,15 +115,16 @@ if __name__ == "__main__":
     if has_rows(trades_tax_df):
         ibkr_writer.write_csv(trades_tax_df, "trades_tax_df.csv")
 
-    summary_sections: list[IbkrSummarySection] = []
-    if has_rows(dividends_country_agg_df):
-        summary_sections.append(IbkrSummarySection("dividends", dividends_country_agg_df))
-    if has_rows(bonds_tax_country_agg_df):
-        summary_sections.append(IbkrSummarySection("bonds", bonds_tax_country_agg_df))
-    if has_rows(reit_divs_agg_df):
-        summary_sections.append(IbkrSummarySection("reit_dividends", reit_divs_agg_df))
-    if has_rows(trades_summary_df):
-        summary_sections.append(IbkrSummarySection("trades", trades_summary_df))
+    summary_sections = [
+        IbkrSummarySection(name, df)
+        for name, df in [
+            ("dividends", dividends_country_agg_df),
+            ("bonds", bonds_tax_country_agg_df),
+            ("reit_dividends", reit_divs_agg_df),
+            ("trades", trades_summary_df),
+        ]
+        if has_rows(df)
+    ]
 
     summary_ibkr_df = calculate_summary_ibkr(sections=summary_sections)
     ibkr_writer.write_csv(summary_ibkr_df, "ibkr_summary.csv")
@@ -144,11 +153,7 @@ if __name__ == "__main__":
         how="vertical",
     ).sort("profit_euro_total", descending=True)
 
-    revolut_writer = PolarsWriter(
-        output_dir=f"data/output/{person}/revolut",
-        report_start_date=reporting_start_date,
-        report_end_date=reporting_end_date,
-    )
+    revolut_writer = run_layout.writer("revolut", reporting_start_date, reporting_end_date)
     revolut_writer.write_csv(revolut_summary_df, "revolut_tax_summary.csv")
     report_sections.append(ReportSection("Revolut", revolut_summary_df))
 
@@ -160,40 +165,91 @@ if __name__ == "__main__":
             start_date=reporting_start_date,
             end_date=reporting_end_date,
         )
-        wise_writer = PolarsWriter(
-            output_dir=f"data/output/{person}/wise",
-            report_start_date=reporting_start_date,
-            report_end_date=reporting_end_date,
-        )
+        wise_writer = run_layout.writer("wise", reporting_start_date, reporting_end_date)
 
         wise_writer.write_csv(wise_summary_df, "wise_tax_summary.csv")
         report_sections.append(ReportSection("Wise", wise_summary_df))
 
     # ------- Freedom Finance
     exclusion_file_path = f"data/input/{person}/freedom/dividend_entries_to_be_excluded_from_future_tax.csv"
-    incorrect_withholding_tax_output_file = (
-        f"data/output/{person}/freedom/dividends_with_incorrect_non_0_withholding_tax.csv"
+    dividend_type_mapping_file = f"data/input/{person}/freedom/dividend_type_mapping.csv"
+    incorrect_withholding_tax_output_file = str(
+        run_layout.artifact_path("freedom", "dividends_with_incorrect_non_0_withholding_tax.csv")
     )
     freedom_summary_df = process_freedom_statement(
         freedom_input_path,
         rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
-        exclude_corporate_action_ids_file=exclusion_file_path if Path(exclusion_file_path).exists() else None,
+        exclude_corporate_action_ids_file=_existing_path_or_none(exclusion_file_path),
         incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
+        dividend_type_mapping_file=_existing_path_or_none(dividend_type_mapping_file),
         separate_trade_profit_loss=freedom_calculate_trade_profit_loss_separately,
     )
-    ff_writer = PolarsWriter(
-        output_dir=f"data/output/{person}/freedom",
-        report_start_date=reporting_start_date,
-        report_end_date=reporting_end_date,
-    )
+    ff_writer = run_layout.writer("freedom", reporting_start_date, reporting_end_date)
     ff_writer.write_csv(freedom_summary_df, "freedom_tax_summary.csv")
     report_sections.append(ReportSection("Freedom Finance", freedom_summary_df))
 
+    ibkr_dividend_buckets_df = build_finanzonline_dividend_buckets_ibkr(
+        xml_file_path=ibkr_input_path,
+        exchange_rates_df=rates_df,
+        start_date=reporting_start_date,
+        end_date=reporting_end_date,
+    )
+    ibkr_bond_buckets_df = build_finanzonline_buckets_from_summary_df("ibkr_bonds", bonds_tax_country_agg_df)
+    ibkr_trade_buckets_df = build_finanzonline_buckets_from_summary_df("ibkr_trades", trades_summary_df)
+    revolut_buckets_df = build_finanzonline_buckets_from_summary_df("revolut", revolut_summary_df)
+
+    freedom_dividend_buckets_df = build_finanzonline_dividend_buckets_freedom(
+        json_file_path=freedom_input_path,
+        exchange_rates_df=rates_df,
+        start_date=reporting_start_date,
+        end_date=reporting_end_date,
+        exclude_corporate_action_ids_file=_existing_path_or_none(exclusion_file_path),
+        incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
+        dividend_type_mapping_file=_existing_path_or_none(dividend_type_mapping_file),
+    )
+    freedom_trade_buckets_df = build_finanzonline_buckets_from_summary_df(
+        "freedom_trades",
+        freedom_summary_df.filter(pl.col("type").cast(pl.String).str.starts_with("trades"))
+        if "type" in freedom_summary_df.columns
+        else None,
+    )
+    wise_buckets_df = (
+        build_finanzonline_buckets_from_summary_df("wise", wise_summary_df)
+        if person == "oryna" and wise_summary_df is not None
+        else empty_finanzonline_bucket_df()
+    )
+
+    finanzonline_bucket_frames = [
+        df
+        for df in [
+            ibkr_dividend_buckets_df,
+            ibkr_bond_buckets_df,
+            ibkr_trade_buckets_df,
+            revolut_buckets_df,
+            freedom_dividend_buckets_df,
+            freedom_trade_buckets_df,
+            wise_buckets_df,
+        ]
+        if not df.is_empty()
+    ]
+    finanzonline_buckets_df = (
+        pl.concat(finanzonline_bucket_frames, how="vertical_relaxed")
+        if finanzonline_bucket_frames
+        else empty_finanzonline_bucket_df()
+    )
+
+    finanzonline_inputs_df, finanzonline_estimate_df = build_finanzonline_report(finanzonline_buckets_df)
+    finanzonline_writer = run_layout.writer("finanzonline", reporting_start_date, reporting_end_date)
+    finanzonline_writer.write_csv(finanzonline_buckets_df, "finanzonline_buckets.csv")
+    finanzonline_writer.write_csv(finanzonline_estimate_df, "finanzonline_estimate.csv")
+    report_sections.append(ReportSection("FinanzOnline Helper", finanzonline_inputs_df))
+    report_sections.append(ReportSection("Tax Estimate", finanzonline_estimate_df))
+
     create_tax_report(
         report_sections,
-        output_path=f"data/output/{person}/tax_report_{person}_{reporting_start_date}_{reporting_end_date}.pdf",
+        output_path=str(run_layout.pdf_path(f"{run_name}.pdf")),
         title=f"Tax Report - {person.capitalize()}",
         start_date=reporting_start_date,
         end_date=reporting_end_date,

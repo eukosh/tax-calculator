@@ -513,10 +513,10 @@ def test_process_trades_ibkr_separates_realized_profit_and_loss_by_default(tmp_p
             Column.currency: ["EUR", "EUR"],
             Column.profit_total: [-68.1818, 90.9091],
             Column.profit_euro_total: [-68.1818, 90.9091],
-            Column.profit_euro_net_total: [-68.1818, 84.6591],
+            Column.profit_euro_net_total: [-68.1818, 90.9091],
             Column.withholding_tax_euro_total: [0.0, 0.0],
-            Column.kest_gross_total: [0.0, 6.25],
-            Column.kest_net_total: [0.0, 6.25],
+            Column.kest_gross_total: [0.0, 0.0],
+            Column.kest_net_total: [0.0, 0.0],
         }
     ).sort(Column.type)
 

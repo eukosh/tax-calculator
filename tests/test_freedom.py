@@ -188,6 +188,96 @@ def test_process_freedom_statement_uses_ex_date_for_fx_matching(tmp_path):
     assert_frame_equal(res_df, expected_df)
 
 
+def test_process_freedom_statement_splits_dividends_using_type_mapping(tmp_path):
+    rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0))
+    mapping_path = tmp_path / "dividend_type_mapping.csv"
+    mapping_path.write_text("ticker,type\nTLT.US,reit_dividends\nAAPL.US,dividends\n")
+    statement_path = _statement_path(
+        tmp_path=tmp_path,
+        corporate_actions=[
+            _corporate_action(
+                event_date="2024-06-10",
+                ex_date="2024-06-03",
+                type_id="dividend",
+                corporate_action_id="div_1",
+                ticker="TLT.US",
+                amount=10.0,
+                tax_amount="-",
+            ),
+            _corporate_action(
+                event_date="2024-06-10",
+                ex_date="2024-06-03",
+                type_id="dividend",
+                corporate_action_id="div_2",
+                ticker="AAPL.US",
+                amount=20.0,
+                tax_amount="-3.0",
+            ),
+        ],
+    )
+
+    res_df = process_freedom_statement(
+        statement_path,
+        rates_df,
+        start_date=REPORTING_PERIOD_START_DATE,
+        end_date=REPORTING_PERIOD_END_DATE,
+        dividend_type_mapping_file=str(mapping_path),
+    ).sort(Column.type)
+
+    expected_df = pl.DataFrame(
+        {
+            Column.type: ["ETF/REIT div", "dividends"],
+            Column.currency: ["USD", "USD"],
+            Column.profit_total: [10.0, 23.0],
+            Column.profit_euro_total: [10.0, 23.0],
+            Column.profit_euro_net_total: [7.25, 16.675],
+            Column.withholding_tax_euro_total: [0.0, 3.0],
+            Column.kest_gross_total: [2.75, 6.325],
+            Column.kest_net_total: [2.75, 3.325],
+        }
+    ).sort(Column.type)
+
+    assert_frame_equal(res_df, expected_df)
+
+
+def test_process_freedom_statement_requires_mapping_for_all_dividend_tickers(tmp_path):
+    rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0))
+    mapping_path = tmp_path / "dividend_type_mapping.csv"
+    mapping_path.write_text("ticker,type\nTLT.US,reit_dividends\n")
+    statement_path = _statement_path(
+        tmp_path=tmp_path,
+        corporate_actions=[
+            _corporate_action(
+                event_date="2024-06-10",
+                ex_date="2024-06-03",
+                type_id="dividend",
+                corporate_action_id="div_1",
+                ticker="TLT.US",
+                amount=10.0,
+                tax_amount="-",
+            ),
+            _corporate_action(
+                event_date="2024-06-10",
+                ex_date="2024-06-03",
+                type_id="dividend",
+                corporate_action_id="div_2",
+                ticker="AAPL.US",
+                amount=20.0,
+                tax_amount="-",
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="Unmapped Freedom dividend tickers: \\['AAPL.US'\\]"):
+        process_freedom_statement(
+            statement_path,
+            rates_df,
+            start_date=REPORTING_PERIOD_START_DATE,
+            end_date=REPORTING_PERIOD_END_DATE,
+            dividend_type_mapping_file=str(mapping_path),
+        )
+
+
 def test_process_freedom_statement_handles_tlt_reversal_with_corrected_dividend(tmp_path):
     rates_df = _rates_df((date(2024, 12, 2), "USD", 1.0))
     corporate_action_id = "2024-12-02_35_TLT.US_0.325021"
@@ -299,17 +389,16 @@ def test_process_freedom_statement_applies_exclusion_file(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("fifo_profit", "expected_profit_euro_total", "expected_kest_total"),
+    ("fifo_profit", "expected_profit_euro_total"),
     [
-        ("110.0", 100.0, 27.5),
-        ("-55.0", -50.0, 0.0),
+        ("110.0", 100.0),
+        ("-55.0", -50.0),
     ],
 )
 def test_process_freedom_statement_includes_trade_summary(
     tmp_path,
     fifo_profit,
     expected_profit_euro_total,
-    expected_kest_total,
 ):
     rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0), (date(2024, 6, 10), "USD", 1.1))
     statement_path = _statement_path(
@@ -357,10 +446,10 @@ def test_process_freedom_statement_includes_trade_summary(
             Column.currency: ["EUR"],
             Column.profit_total: [expected_profit_euro_total],
             Column.profit_euro_total: [expected_profit_euro_total],
-            Column.profit_euro_net_total: [expected_profit_euro_total - expected_kest_total],
+            Column.profit_euro_net_total: [expected_profit_euro_total],
             Column.withholding_tax_euro_total: [0.0],
-            Column.kest_gross_total: [expected_kest_total],
-            Column.kest_net_total: [expected_kest_total],
+            Column.kest_gross_total: [0.0],
+            Column.kest_net_total: [0.0],
         }
     )
 
@@ -407,10 +496,10 @@ def test_process_freedom_statement_uses_profit_when_fifo_profit_is_zero_for_awar
             Column.currency: ["EUR"],
             Column.profit_total: [100.0],
             Column.profit_euro_total: [100.0],
-            Column.profit_euro_net_total: [72.5],
+            Column.profit_euro_net_total: [100.0],
             Column.withholding_tax_euro_total: [0.0],
-            Column.kest_gross_total: [27.5],
-            Column.kest_net_total: [27.5],
+            Column.kest_gross_total: [0.0],
+            Column.kest_net_total: [0.0],
         }
     )
 
@@ -482,10 +571,10 @@ def test_process_freedom_statement_separates_trade_profit_and_loss_by_default(tm
             Column.currency: ["EUR", "EUR"],
             Column.profit_total: [-50.0, 100.0],
             Column.profit_euro_total: [-50.0, 100.0],
-            Column.profit_euro_net_total: [-50.0, 86.25],
+            Column.profit_euro_net_total: [-50.0, 100.0],
             Column.withholding_tax_euro_total: [0.0, 0.0],
-            Column.kest_gross_total: [0.0, 13.75],
-            Column.kest_net_total: [0.0, 13.75],
+            Column.kest_gross_total: [0.0, 0.0],
+            Column.kest_net_total: [0.0, 0.0],
         }
     ).sort(Column.type)
 

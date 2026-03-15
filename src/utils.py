@@ -179,6 +179,43 @@ def convert_to_euro(df: pl.DataFrame, col_to_convert: Union[str, Sequence[str]])
     return df.with_columns(cols_conversion_expr)
 
 
+def build_separate_trade_profit_loss_rows(
+    totals_df: pl.DataFrame,
+    profit_col: str = "trade_profit_euro_total",
+    loss_col: str = "trade_loss_euro_total",
+) -> list[pl.DataFrame]:
+    """Build separate profit and loss summary rows with zero KESt for cross-broker offset."""
+    frames: list[pl.DataFrame] = []
+
+    profit_row_df = totals_df.select(
+        pl.lit("trades profit").alias(Column.type),
+        pl.lit(CurrencyCode.euro.value).alias(Column.currency),
+        pl.col(profit_col).alias(Column.profit_total),
+        pl.col(profit_col).alias(Column.profit_euro_total),
+        pl.col(profit_col).alias(Column.profit_euro_net_total),
+        pl.lit(0.0).alias(Column.withholding_tax_euro_total),
+        pl.lit(0.0).alias(Column.kest_gross_total),
+        pl.lit(0.0).alias(Column.kest_net_total),
+    ).filter(pl.col(Column.profit_euro_total) != 0)
+    if not profit_row_df.is_empty():
+        frames.append(profit_row_df)
+
+    loss_row_df = totals_df.select(
+        pl.lit("trades loss").alias(Column.type),
+        pl.lit(CurrencyCode.euro.value).alias(Column.currency),
+        (-pl.col(loss_col)).round(FLOAT_PRECISION).alias(Column.profit_total),
+        (-pl.col(loss_col)).round(FLOAT_PRECISION).alias(Column.profit_euro_total),
+        (-pl.col(loss_col)).round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
+        pl.lit(0.0).alias(Column.withholding_tax_euro_total),
+        pl.lit(0.0).alias(Column.kest_gross_total),
+        pl.lit(0.0).alias(Column.kest_net_total),
+    ).filter(pl.col(Column.profit_euro_total) != 0)
+    if not loss_row_df.is_empty():
+        frames.append(loss_row_df)
+
+    return frames
+
+
 def calculate_kest(
     df: pl.DataFrame, amount_col: str, tax_withheld_col: str | None = None, net_col_name: str | None = None
 ) -> pl.DataFrame:

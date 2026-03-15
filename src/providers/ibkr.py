@@ -7,7 +7,27 @@ import polars as pl
 
 from src.const import FLOAT_PRECISION, CurrencyCode, TransactionTypeIBKR
 from src.const import Column as Col
-from src.utils import calculate_kest, convert_to_euro, extract_elements, has_rows, join_exchange_rates, read_xml_to_df
+from src.finanzonline import (
+    BUCKET_AMOUNT_EUR_COL,
+    BUCKET_CATEGORY_COL,
+    BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL,
+    BUCKET_LABEL_COL,
+    BUCKET_SCHEMA,
+    BUCKET_SOURCE_COL,
+    BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL,
+    ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY,
+    ORDINARY_INCOME_BUCKET_CATEGORY,
+    empty_finanzonline_bucket_df,
+)
+from src.utils import (
+    build_separate_trade_profit_loss_rows,
+    calculate_kest,
+    convert_to_euro,
+    extract_elements,
+    has_rows,
+    join_exchange_rates,
+    read_xml_to_df,
+)
 
 IBKR_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -94,6 +114,113 @@ def agg_final_transactions(df: pl.DataFrame) -> pl.DataFrame:
         )
         .sort("dividends_euro_total", descending=True)
     )
+
+
+def _build_cash_transactions_tax_df(
+    xml_file_path: str,
+    exchange_rates_df: pl.DataFrame,
+    start_date: date,
+    end_date: date,
+) -> pl.DataFrame | None:
+    cash_transactions_df = read_xml_to_df(
+        file_path=xml_file_path,
+        xml_extract_func=lambda root: extract_elements(root.find(".//CashTransactions"), "CashTransaction"),
+    )
+    if cash_transactions_df.is_empty():
+        return None
+
+    cash_transactions_df = (
+        cash_transactions_df.rename({"subCategory": "sub_category", "actionID": "action_id"})
+        .with_columns(
+            pl.col("amount").cast(pl.Float64).alias("amount"),
+            pl.col("issuerCountryCode").alias("issuer_country_code"),
+            pl.col("settleDate").str.strptime(pl.Date, "%Y-%m-%d").alias("settle_date"),
+        )
+        .filter(pl.col("settle_date").is_between(start_date, end_date))
+    )
+    cash_transactions_df = handle_dividend_adjustments(cash_transactions_df)
+
+    types = cash_transactions_df["type"].unique().to_list()
+    logging.info(f"Transaction Types: {types}")
+    sum_per_type_df = cash_transactions_df.group_by("sub_category", "type").agg(pl.col("amount").sum())
+    logging.info(f"\nSum per Transaction Category-Type:\n{sum_per_type_df}")
+
+    cash_transactions_df = (
+        cash_transactions_df.select(
+            [
+                "symbol",
+                "sub_category",
+                "currency",
+                pl.when(pl.col("type") == TransactionTypeIBKR.pil)
+                .then(pl.lit(TransactionTypeIBKR.dividend))
+                .otherwise(pl.col("type"))
+                .alias("type"),
+                pl.col("amount").alias("amount"),
+                "settle_date",
+                "issuer_country_code",
+            ]
+        )
+        .filter(pl.col("type").is_in(["Dividends", "Withholding Tax"]))
+        .with_columns(
+            pl.when(pl.col("type") == TransactionTypeIBKR.tax)
+            .then(pl.col("amount").abs())
+            .otherwise(pl.col("amount"))
+            .alias("amount")
+        )
+    )
+
+    joined_df = join_exchange_rates(
+        df=cash_transactions_df,
+        rates_df=exchange_rates_df,
+        df_date_col="settle_date",
+    )
+    joined_df = convert_to_euro(joined_df, col_to_convert="amount")
+
+    pivoted_df = apply_pivot(joined_df)
+    logging.debug("\nPivoted DataFrame:\n {}".format(pivoted_df))
+
+    pivoted_df = calculate_kest(pivoted_df, amount_col="dividends_euro", tax_withheld_col="withholding_tax_euro")
+    logging.debug("\nPivoted with KeST DataFrame:\n {}".format(pivoted_df))
+    return pivoted_df
+
+
+def build_finanzonline_dividend_buckets_ibkr(
+    xml_file_path: str,
+    exchange_rates_df: pl.DataFrame,
+    start_date: date,
+    end_date: date,
+) -> pl.DataFrame:
+    tax_df = _build_cash_transactions_tax_df(
+        xml_file_path=xml_file_path,
+        exchange_rates_df=exchange_rates_df,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if tax_df is None or tax_df.is_empty():
+        return empty_finanzonline_bucket_df()
+
+    return tax_df.select(
+        pl.lit("ibkr").alias(BUCKET_SOURCE_COL),
+        pl.concat_str(
+            [
+                pl.lit("cash_dividend:"),
+                pl.col("settle_date").cast(pl.String),
+                pl.lit(":"),
+                pl.col("symbol"),
+                pl.lit(":"),
+                pl.col("sub_category"),
+            ]
+        ).alias(BUCKET_LABEL_COL),
+        pl.when(pl.col("sub_category").is_in(["REIT", "ETF"]))
+        .then(pl.lit(ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY))
+        .otherwise(pl.lit(ORDINARY_INCOME_BUCKET_CATEGORY))
+        .alias(BUCKET_CATEGORY_COL),
+        pl.col("dividends_euro").alias(BUCKET_AMOUNT_EUR_COL),
+        pl.col("withholding_tax_euro").alias(BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL),
+        (pl.col("kest_gross") - pl.col("kest_net"))
+        .clip(lower_bound=0.0)
+        .alias(BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL),
+    ).cast(BUCKET_SCHEMA)
 
 
 def process_trades_ibkr(
@@ -194,14 +321,13 @@ def process_trades_ibkr(
         pl.col(Col.profit_euro_total).clip(lower_bound=0.0).alias("taxable_profit_euro"),
     )
 
-    trades_tax_df = calculate_kest(
-        df=trades_totals_df,
-        amount_col="taxable_profit_euro",
-        tax_withheld_col=None,
-        net_col_name="taxable_profit_euro_net",
-    )
-
     if not separate_trade_profit_loss:
+        trades_tax_df = calculate_kest(
+            df=trades_totals_df,
+            amount_col="taxable_profit_euro",
+            tax_withheld_col=None,
+            net_col_name="taxable_profit_euro_net",
+        )
         trades_summary_df = trades_tax_df.select(
             pl.lit(CurrencyCode.euro.value).alias(Col.currency),
             pl.col(Col.profit_total),
@@ -213,33 +339,7 @@ def process_trades_ibkr(
         )
         return trades_detail_df, trades_summary_df
 
-    summary_frames: list[pl.DataFrame] = []
-    profit_row_df = trades_tax_df.select(
-        pl.lit("trades profit").alias(Col.type),
-        pl.lit(CurrencyCode.euro.value).alias(Col.currency),
-        pl.col("trade_profit_euro_total").alias(Col.profit_total),
-        pl.col("trade_profit_euro_total").alias(Col.profit_euro_total),
-        (pl.col("trade_profit_euro_total") - pl.col(Col.kest_net)).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
-        pl.lit(0.0).alias(Col.withholding_tax_euro_total),
-        pl.col(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
-        pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
-    ).filter(pl.col(Col.profit_euro_total) != 0)
-    if not profit_row_df.is_empty():
-        summary_frames.append(profit_row_df)
-
-    loss_row_df = trades_tax_df.select(
-        pl.lit("trades loss").alias(Col.type),
-        pl.lit(CurrencyCode.euro.value).alias(Col.currency),
-        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_total),
-        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_euro_total),
-        (-pl.col("trade_loss_euro_total")).round(FLOAT_PRECISION).alias(Col.profit_euro_net_total),
-        pl.lit(0.0).alias(Col.withholding_tax_euro_total),
-        pl.lit(0.0).alias(Col.kest_gross_total),
-        pl.lit(0.0).alias(Col.kest_net_total),
-    ).filter(pl.col(Col.profit_euro_total) != 0)
-    if not loss_row_df.is_empty():
-        summary_frames.append(loss_row_df)
-
+    summary_frames = build_separate_trade_profit_loss_rows(trades_totals_df)
     trades_summary_df = pl.concat(summary_frames, how="vertical_relaxed") if summary_frames else None
 
     return trades_detail_df, trades_summary_df
@@ -263,65 +363,14 @@ def process_cash_transactions_ibkr(
     8. Aggregate final country-level totals and return main + optional ETF/REIT outputs.
     """
     logging.info("\n\n======================== Processing Cash Transactions ========================\n")
-    cash_transactions_df = read_xml_to_df(
-        file_path=xml_file_path,
-        xml_extract_func=lambda root: extract_elements(root.find(".//CashTransactions"), "CashTransaction"),
+    pivoted_df = _build_cash_transactions_tax_df(
+        xml_file_path=xml_file_path,
+        exchange_rates_df=exchange_rates_df,
+        start_date=start_date,
+        end_date=end_date,
     )
-
-    cash_transactions_df = (
-        cash_transactions_df.rename({"subCategory": "sub_category", "actionID": "action_id"})
-        .with_columns(
-            pl.col("amount").cast(pl.Float64).alias("amount"),
-            pl.col("issuerCountryCode").alias("issuer_country_code"),
-            pl.col("settleDate").str.strptime(pl.Date, "%Y-%m-%d").alias("settle_date"),
-        )
-        .filter(pl.col("settle_date").is_between(start_date, end_date))
-    )
-    cash_transactions_df = handle_dividend_adjustments(cash_transactions_df)
-
-    types = cash_transactions_df["type"].unique().to_list()
-    logging.info(f"Transaction Types: {types}")
-    sum_per_type_df = cash_transactions_df.group_by("sub_category", "type").agg(pl.col("amount").sum())
-    logging.info(f"\nSum per Transaction Category-Type:\n{sum_per_type_df}")
-
-    # Filter for dividends/tax in Cash Transactions
-    cash_transactions_df = (
-        cash_transactions_df.select(
-            [
-                "symbol",
-                "sub_category",
-                "currency",
-                pl.when(pl.col("type") == TransactionTypeIBKR.pil)
-                .then(pl.lit(TransactionTypeIBKR.dividend))
-                .otherwise(pl.col("type"))
-                .alias("type"),  # in Austria, PIL is the same as Dividend
-                pl.col("amount").alias("amount"),
-                "settle_date",
-                "issuer_country_code",
-            ]
-        )
-        .filter(pl.col("type").is_in(["Dividends", "Withholding Tax"]))
-        .with_columns(
-            pl.when(pl.col("type") == TransactionTypeIBKR.tax)
-            .then(pl.col("amount").abs())
-            .otherwise(pl.col("amount"))
-            .alias("amount")
-        )
-    )
-
-    joined_df = join_exchange_rates(
-        df=cash_transactions_df,
-        rates_df=exchange_rates_df,
-        df_date_col="settle_date",
-    )
-
-    joined_df = convert_to_euro(joined_df, col_to_convert="amount")
-
-    pivoted_df = apply_pivot(joined_df)
-    logging.debug("\nPivoted DataFrame:\n {}".format(pivoted_df))
-
-    pivoted_df = calculate_kest(pivoted_df, amount_col="dividends_euro", tax_withheld_col="withholding_tax_euro")
-    logging.debug("\nPivoted with KeST DataFrame:\n {}".format(pivoted_df))
+    if pivoted_df is None or pivoted_df.is_empty():
+        return None, None
 
     etf_reit_agg_df = None
     if extract_etf_and_reit:
