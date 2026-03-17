@@ -89,12 +89,12 @@ if __name__ == "__main__":
         end_date=reporting_end_date,
         separate_trade_profit_loss=ibkr_calculate_trade_profit_loss_separately,
     )
-    dividends_country_agg_df, reit_divs_agg_df = process_cash_transactions_ibkr(
+    dividends_country_agg_df, etf_divs_agg_df = process_cash_transactions_ibkr(
         xml_file_path=ibkr_input_path,
         exchange_rates_df=rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
-        extract_etf_and_reit=True,
+        extract_etf=True,
     )
 
     bonds_tax_df, bonds_tax_country_agg_df = process_bonds_ibkr(
@@ -120,7 +120,7 @@ if __name__ == "__main__":
         for name, df in [
             ("dividends", dividends_country_agg_df),
             ("bonds", bonds_tax_country_agg_df),
-            ("reit_dividends", reit_divs_agg_df),
+            ("etf_dividends", etf_divs_agg_df),
             ("trades", trades_summary_df),
         ]
         if has_rows(df)

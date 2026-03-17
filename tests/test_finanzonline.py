@@ -15,8 +15,8 @@ from src.finanzonline import (
     ESTIMATE_LABEL_COL,
     ESTIMATED_BASE_LABEL,
     ESTIMATED_TAX_LABEL,
-    ETF_REIT_DISTRIBUTIONS_LABEL,
-    ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY,
+    ETF_DISTRIBUTIONS_LABEL,
+    ETF_DISTRIBUTION_BUCKET_CATEGORY,
     INPUT_LABEL_COL,
     LOSS_OFFSET_METHOD_FAVORABLE,
     LOSS_OFFSET_METHOD_PROPORTIONAL,
@@ -51,7 +51,7 @@ def _bucket_df(rows: list[dict[str, object]]) -> pl.DataFrame:
 def test_build_finanzonline_buckets_from_provider_summaries_and_report():
     ibkr_summary_df = pl.DataFrame(
         {
-            Column.type: ["dividends", "bonds", "ETF/REIT div", "trades profit", "trades loss"],
+            Column.type: ["dividends", "bonds", "ETF div", "trades profit", "trades loss"],
             Column.currency: ["USD", "USD", "USD", "EUR", "EUR"],
             Column.profit_total: [100.0, 40.0, 50.0, 20.0, -5.0],
             Column.profit_euro_total: [100.0, 40.0, 50.0, 20.0, -5.0],
@@ -63,7 +63,7 @@ def test_build_finanzonline_buckets_from_provider_summaries_and_report():
     )
     freedom_summary_df = pl.DataFrame(
         {
-            Column.type: ["ETF/REIT div", "trades profit"],
+            Column.type: ["ETF div", "trades profit"],
             Column.currency: ["USD", "EUR"],
             Column.profit_total: [60.0, 10.0],
             Column.profit_euro_total: [60.0, 10.0],
@@ -104,7 +104,7 @@ def test_build_finanzonline_buckets_from_provider_summaries_and_report():
                 ORDINARY_CAPITAL_INCOME_LABEL,
                 TRADE_PROFIT_LABEL,
                 TRADE_LOSS_LABEL,
-                ETF_REIT_DISTRIBUTIONS_LABEL,
+                ETF_DISTRIBUTIONS_LABEL,
                 WITHHELD_FOREIGN_TAX_LABEL,
                 CREDITABLE_FOREIGN_TAX_LABEL,
             ],
@@ -170,7 +170,7 @@ def test_build_finanzonline_report_favorable_allocates_losses_to_zero_credit_inc
                     ORDINARY_CAPITAL_INCOME_LABEL,
                     TRADE_PROFIT_LABEL,
                     TRADE_LOSS_LABEL,
-                    ETF_REIT_DISTRIBUTIONS_LABEL,
+                    ETF_DISTRIBUTIONS_LABEL,
                     WITHHELD_FOREIGN_TAX_LABEL,
                     CREDITABLE_FOREIGN_TAX_LABEL,
                 ],
@@ -302,7 +302,7 @@ def test_build_finanzonline_report_zeroes_credit_when_losses_eliminate_all_posit
             {
                 BUCKET_SOURCE_COL: "ibkr",
                 BUCKET_LABEL_COL: "dividend",
-                BUCKET_CATEGORY_COL: ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY,
+                BUCKET_CATEGORY_COL: ETF_DISTRIBUTION_BUCKET_CATEGORY,
                 BUCKET_AMOUNT_EUR_COL: 100.0,
                 BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL: 15.0,
                 BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL: 15.0,
@@ -331,7 +331,7 @@ def test_build_finanzonline_report_zeroes_credit_when_losses_eliminate_all_posit
                     ORDINARY_CAPITAL_INCOME_LABEL,
                     TRADE_PROFIT_LABEL,
                     TRADE_LOSS_LABEL,
-                    ETF_REIT_DISTRIBUTIONS_LABEL,
+                    ETF_DISTRIBUTIONS_LABEL,
                     WITHHELD_FOREIGN_TAX_LABEL,
                     CREDITABLE_FOREIGN_TAX_LABEL,
                 ],
@@ -546,7 +546,7 @@ def test_build_finanzonline_report_trades_zero_amount_classified_as_profit():
                     ORDINARY_CAPITAL_INCOME_LABEL,
                     TRADE_PROFIT_LABEL,
                     TRADE_LOSS_LABEL,
-                    ETF_REIT_DISTRIBUTIONS_LABEL,
+                    ETF_DISTRIBUTIONS_LABEL,
                     WITHHELD_FOREIGN_TAX_LABEL,
                     CREDITABLE_FOREIGN_TAX_LABEL,
                 ],

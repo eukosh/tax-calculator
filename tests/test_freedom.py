@@ -191,7 +191,7 @@ def test_process_freedom_statement_uses_ex_date_for_fx_matching(tmp_path):
 def test_process_freedom_statement_splits_dividends_using_type_mapping(tmp_path):
     rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0))
     mapping_path = tmp_path / "dividend_type_mapping.csv"
-    mapping_path.write_text("ticker,type\nTLT.US,reit_dividends\nAAPL.US,dividends\n")
+    mapping_path.write_text("ticker,type\nTLT.US,etf_dividends\nAAPL.US,dividends\n")
     statement_path = _statement_path(
         tmp_path=tmp_path,
         corporate_actions=[
@@ -226,7 +226,7 @@ def test_process_freedom_statement_splits_dividends_using_type_mapping(tmp_path)
 
     expected_df = pl.DataFrame(
         {
-            Column.type: ["ETF/REIT div", "dividends"],
+            Column.type: ["ETF div", "dividends"],
             Column.currency: ["USD", "USD"],
             Column.profit_total: [10.0, 23.0],
             Column.profit_euro_total: [10.0, 23.0],
@@ -243,7 +243,7 @@ def test_process_freedom_statement_splits_dividends_using_type_mapping(tmp_path)
 def test_process_freedom_statement_requires_mapping_for_all_dividend_tickers(tmp_path):
     rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0))
     mapping_path = tmp_path / "dividend_type_mapping.csv"
-    mapping_path.write_text("ticker,type\nTLT.US,reit_dividends\n")
+    mapping_path.write_text("ticker,type\nTLT.US,etf_dividends\n")
     statement_path = _statement_path(
         tmp_path=tmp_path,
         corporate_actions=[

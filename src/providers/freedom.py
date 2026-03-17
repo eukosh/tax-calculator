@@ -15,7 +15,7 @@ from src.finanzonline import (
     BUCKET_SCHEMA,
     BUCKET_SOURCE_COL,
     BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL,
-    ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY,
+    ETF_DISTRIBUTION_BUCKET_CATEGORY,
     ORDINARY_INCOME_BUCKET_CATEGORY,
     empty_finanzonline_bucket_df,
 )
@@ -25,10 +25,10 @@ EMPTY_VALUE = "-"
 EX_DATE_COL = "ex_date"
 TRADE_OPERATION_COL = "operation"
 ABS_EPSILON = 1e-9
-DIVIDEND_TYPE_MAPPING_ALLOWED = {"dividends", "reit_dividends"}
+DIVIDEND_TYPE_MAPPING_ALLOWED = {"dividends", "etf_dividends"}
 DIVIDEND_SUMMARY_TYPE_LABELS = {
     "dividends": "dividends",
-    "reit_dividends": "ETF/REIT div",
+    "etf_dividends": "ETF div",
 }
 
 TICKERS_WITHHOLDING_ZERO_TAX = ["TLT.US"]
@@ -443,8 +443,8 @@ def build_finanzonline_dividend_buckets_freedom(
                 pl.col(Col.corporate_action_id),
             ]
         ).alias(BUCKET_LABEL_COL),
-        pl.when(pl.col("_summary_type") == "ETF/REIT div")
-        .then(pl.lit(ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY))
+        pl.when(pl.col("_summary_type") == "ETF div")
+        .then(pl.lit(ETF_DISTRIBUTION_BUCKET_CATEGORY))
         .otherwise(pl.lit(ORDINARY_INCOME_BUCKET_CATEGORY))
         .alias(BUCKET_CATEGORY_COL),
         pl.col(Col.amount_euro).alias(BUCKET_AMOUNT_EUR_COL),

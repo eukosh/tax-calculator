@@ -25,8 +25,8 @@ It does not cover:
   Sum of positive trade-profit buckets.
 - `Trade losses 27.5% (enter as negative)`
   Sum of negative trade-loss buckets.
-- `ETF/REIT distributions 27.5%`
-  Sum of ETF/REIT distribution buckets.
+- `ETF distributions 27.5%`
+  Sum of ETF distribution buckets.
 - `Foreign tax withheld`
   Raw foreign tax actually withheld by brokers.
 - `Creditable foreign tax`
@@ -46,7 +46,7 @@ Each bucket has:
 Current categories:
 
 - `ordinary_income`
-- `etf_reit_distribution`
+- `etf_distribution`
 - `trade_profit`
 - `trade_loss`
 

@@ -13,7 +13,7 @@ AMOUNT_EUR_COL = "Amount (EUR)"
 ORDINARY_CAPITAL_INCOME_LABEL = "Capital income 27.5% (dividends/interest)"
 TRADE_PROFIT_LABEL = "Trade profits 27.5%"
 TRADE_LOSS_LABEL = "Trade losses 27.5% (enter as negative)"
-ETF_REIT_DISTRIBUTIONS_LABEL = "ETF/REIT distributions 27.5%"
+ETF_DISTRIBUTIONS_LABEL = "ETF distributions 27.5%"
 WITHHELD_FOREIGN_TAX_LABEL = "Foreign tax withheld"
 CREDITABLE_FOREIGN_TAX_LABEL = "Creditable foreign tax"
 
@@ -26,7 +26,7 @@ LOSS_OFFSET_METHOD_FAVORABLE = "favorable"
 LOSS_OFFSET_METHOD_PROPORTIONAL = "proportional"
 
 ORDINARY_INCOME_BUCKET_CATEGORY = "ordinary_income"
-ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY = "etf_reit_distribution"
+ETF_DISTRIBUTION_BUCKET_CATEGORY = "etf_distribution"
 TRADE_PROFIT_BUCKET_CATEGORY = "trade_profit"
 TRADE_LOSS_BUCKET_CATEGORY = "trade_loss"
 
@@ -72,8 +72,8 @@ def _sum_df_column(df: pl.DataFrame, column_name: str) -> float:
 def _coarse_bucket_category(row_type: str, amount_eur: float) -> str:
     if row_type in {"", "dividends", "bonds"}:
         return ORDINARY_INCOME_BUCKET_CATEGORY
-    if row_type == "ETF/REIT div":
-        return ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY
+    if row_type == "ETF div":
+        return ETF_DISTRIBUTION_BUCKET_CATEGORY
     if row_type == "trades profit":
         return TRADE_PROFIT_BUCKET_CATEGORY
     if row_type == "trades loss":
@@ -207,7 +207,7 @@ def build_finanzonline_report(
     buckets_df = _existing_bucket_df(buckets_df)
 
     ordinary_income = _sum_bucket_amount_by_category(buckets_df, ORDINARY_INCOME_BUCKET_CATEGORY)
-    etf_reit_distributions = _sum_bucket_amount_by_category(buckets_df, ETF_REIT_DISTRIBUTION_BUCKET_CATEGORY)
+    etf_distributions = _sum_bucket_amount_by_category(buckets_df, ETF_DISTRIBUTION_BUCKET_CATEGORY)
     trade_profit = _sum_bucket_amount_by_category(buckets_df, TRADE_PROFIT_BUCKET_CATEGORY)
     trade_loss = _sum_bucket_amount_by_category(buckets_df, TRADE_LOSS_BUCKET_CATEGORY)
     withheld_foreign_tax = _sum_df_column(buckets_df, BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL)
@@ -222,7 +222,7 @@ def build_finanzonline_report(
                 ORDINARY_CAPITAL_INCOME_LABEL,
                 TRADE_PROFIT_LABEL,
                 TRADE_LOSS_LABEL,
-                ETF_REIT_DISTRIBUTIONS_LABEL,
+                ETF_DISTRIBUTIONS_LABEL,
                 WITHHELD_FOREIGN_TAX_LABEL,
                 CREDITABLE_FOREIGN_TAX_LABEL,
             ],
@@ -230,7 +230,7 @@ def build_finanzonline_report(
                 _round_amount(ordinary_income),
                 _round_amount(trade_profit),
                 _round_amount(trade_loss),
-                _round_amount(etf_reit_distributions),
+                _round_amount(etf_distributions),
                 _round_amount(withheld_foreign_tax),
                 _round_amount(creditable_foreign_tax),
             ],

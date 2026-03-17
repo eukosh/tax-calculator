@@ -22,7 +22,7 @@ FINANZONLINE_NOTES = [
     "For the currently supported dividend/distribution rows, the treaty cap is generally 15% of gross income.",
     "Final creditable foreign tax uses favorable loss allocation: losses are applied first to "
     "positive income buckets with the lowest foreign-tax-credit ratio.",
-    "Total tax base 27.5% = max(capital income + ETF/REIT distributions + trade profits + trade losses, 0).",
+    "Total tax base 27.5% = max(capital income + ETF distributions + trade profits + trade losses, 0).",
     "Estimated Austrian tax = max(total tax base * 27.5% - final creditable foreign tax, 0).",
     "Detailed formulas and decision rules are documented in docs/.",
 ]
