@@ -11,10 +11,7 @@ It is meant to answer 2 questions:
 
 This note uses the data currently present in the repo:
 
-- Freedom statement for 2025:
-  [`data/input/eugene/2025/freedom_2024-12-31 23_59_59_2025-12-31 23_59_59_all.json`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/data/input/eugene/2025/freedom_2024-12-31%2023_59_59_2025-12-31%2023_59_59_all.json)
-- Freedom statement for 2024 history:
-  [`data/input/eugene/freedom/2024-04-30_23_59_59_2024-12-31_23_59_59.json`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/data/input/eugene/freedom/2024-04-30_23_59_59_2024-12-31_23_59_59.json)
+- Freedom statement for the whole lifetime of account: /Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/data/input/eugene/2025/non_reporting_funds_exit/freedom_2024-03-26 23_59_59_2026-03-17 23_59_59_all.json
 - ECB/OeNB USD/EUR rates:
   [`data/input/currencies/raw_exchange_rates.csv`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/data/input/currencies/raw_exchange_rates.csv)
 

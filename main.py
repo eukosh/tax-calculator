@@ -52,6 +52,7 @@ if __name__ == "__main__":
     reporting_end_date = date(2025, 12, 31)
     ibkr_calculate_trade_profit_loss_separately = True
     freedom_calculate_trade_profit_loss_separately = True
+    include_freedom_trades = True
 
     logging.info(f"Reporting dates: {reporting_start_date} - {reporting_end_date}")
 
@@ -185,6 +186,7 @@ if __name__ == "__main__":
         incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
         dividend_type_mapping_file=_existing_path_or_none(dividend_type_mapping_file),
         separate_trade_profit_loss=freedom_calculate_trade_profit_loss_separately,
+        include_trades=include_freedom_trades,
     )
     ff_writer = run_layout.writer("freedom", reporting_start_date, reporting_end_date)
     ff_writer.write_csv(freedom_summary_df, "freedom_tax_summary.csv")

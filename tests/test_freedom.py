@@ -626,3 +626,53 @@ def test_process_freedom_statement_can_disable_separate_trade_profit_loss_report
     )
 
     assert_frame_equal(res_df, expected_df)
+
+
+def test_process_freedom_statement_can_exclude_trades_entirely(tmp_path):
+    rates_df = _rates_df((date(2024, 6, 3), "USD", 1.0))
+    statement_path = _statement_path(
+        tmp_path=tmp_path,
+        corporate_actions=[
+            _corporate_action(
+                event_date="2024-06-10",
+                ex_date="2024-06-03",
+                type_id="dividend",
+                corporate_action_id="div_1",
+                ticker="TLT.US",
+                amount=10.0,
+                tax_amount="-",
+            )
+        ],
+        trades=[
+            _trade(
+                short_date="2024-06-03",
+                operation="sell",
+                instr_nm="AAPL.US",
+                curr_c="USD",
+                fifo_profit="110.0",
+            )
+        ],
+    )
+
+    res_df = process_freedom_statement(
+        statement_path,
+        rates_df,
+        start_date=REPORTING_PERIOD_START_DATE,
+        end_date=REPORTING_PERIOD_END_DATE,
+        include_trades=False,
+    )
+
+    expected_df = pl.DataFrame(
+        {
+            Column.type: ["dividends"],
+            Column.currency: ["USD"],
+            Column.profit_total: [10.0],
+            Column.profit_euro_total: [10.0],
+            Column.profit_euro_net_total: [7.25],
+            Column.withholding_tax_euro_total: [0.0],
+            Column.kest_gross_total: [2.75],
+            Column.kest_net_total: [2.75],
+        }
+    )
+
+    assert_frame_equal(res_df, expected_df)

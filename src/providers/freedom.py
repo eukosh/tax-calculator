@@ -656,6 +656,7 @@ def process_freedom_statement(
     incorrect_withholding_tax_output_file: str | None = None,
     dividend_type_mapping_file: str | None = None,
     separate_trade_profit_loss: bool = True,
+    include_trades: bool = True,
 ) -> pl.DataFrame:
     """
     1. Load Freedom statement sections and normalize corporate actions/trades for the reporting period.
@@ -685,16 +686,18 @@ def process_freedom_statement(
         dividend_type_mapping=dividend_type_mapping,
     )
 
-    trades_df = _load_trades_df(
-        statement=statement,
-        exchange_rates_df=exchange_rates_df,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    trades_summary_df = _summarize_trades(
-        trades_df,
-        separate_trade_profit_loss=separate_trade_profit_loss,
-    )
+    trades_summary_df = None
+    if include_trades:
+        trades_df = _load_trades_df(
+            statement=statement,
+            exchange_rates_df=exchange_rates_df,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        trades_summary_df = _summarize_trades(
+            trades_df,
+            separate_trade_profit_loss=separate_trade_profit_loss,
+        )
 
     summary_frames = [df for df in [dividends_summary_df, trades_summary_df] if df is not None and not df.is_empty()]
     if not summary_frames:
