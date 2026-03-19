@@ -121,6 +121,7 @@ def _build_cash_transactions_tax_df(
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
+    excluded_cash_transaction_subcategories: set[str] | None = None,
 ) -> pl.DataFrame | None:
     cash_transactions_df = read_xml_to_df(
         file_path=xml_file_path,
@@ -138,6 +139,12 @@ def _build_cash_transactions_tax_df(
         )
         .filter(pl.col("settle_date").is_between(start_date, end_date))
     )
+    if excluded_cash_transaction_subcategories:
+        cash_transactions_df = cash_transactions_df.filter(
+            ~pl.col("sub_category").is_in(sorted(excluded_cash_transaction_subcategories))
+        )
+    if cash_transactions_df.is_empty():
+        return None
     cash_transactions_df = handle_dividend_adjustments(cash_transactions_df)
 
     types = cash_transactions_df["type"].unique().to_list()
@@ -189,12 +196,14 @@ def build_finanzonline_dividend_buckets_ibkr(
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
+    excluded_cash_transaction_subcategories: set[str] | None = None,
 ) -> pl.DataFrame:
     tax_df = _build_cash_transactions_tax_df(
         xml_file_path=xml_file_path,
         exchange_rates_df=exchange_rates_df,
         start_date=start_date,
         end_date=end_date,
+        excluded_cash_transaction_subcategories=excluded_cash_transaction_subcategories,
     )
     if tax_df is None or tax_df.is_empty():
         return empty_finanzonline_bucket_df()
@@ -229,6 +238,7 @@ def process_trades_ibkr(
     start_date: date,
     end_date: date,
     separate_trade_profit_loss: bool = True,
+    excluded_trade_subcategories: set[str] | None = None,
 ) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
     """
     1. Load closed trade lots from XML and keep only fields needed for tax math.
@@ -248,12 +258,27 @@ def process_trades_ibkr(
         logging.warning("No Trades found in the XML file.")
         return None, None
 
+    rename_map = {
+        "openDateTime": Col.buy_date,
+        "tradeDate": Col.trade_date,
+        "fifoPnlRealized": Col.profit,
+        "subCategory": "sub_category",
+    }
+
     trades_df = (
-        trades_df.rename({"openDateTime": Col.buy_date, "tradeDate": Col.trade_date, "fifoPnlRealized": Col.profit})
+        trades_df.with_columns(
+            (
+                pl.col("subCategory").cast(pl.String).fill_null("")
+                if "subCategory" in trades_df.columns
+                else pl.lit("", dtype=pl.String)
+            ).alias("subCategory")
+        )
+        .rename(rename_map)
         .select(
             Col.symbol,
             pl.col("cost").cast(pl.Float64),
             Col.currency,
+            pl.col("sub_category").cast(pl.String).fill_null(""),
             pl.col(Col.buy_date).str.to_date(format=IBKR_DATETIME_FORMAT),
             pl.col(Col.trade_date).str.to_date(),
             pl.col(Col.profit).cast(pl.Float64),
@@ -261,6 +286,8 @@ def process_trades_ibkr(
         .filter(pl.col(Col.trade_date).is_between(start_date, end_date))
         .with_columns((pl.col("cost") + pl.col(Col.profit)).alias(Col.proceeds))
     )
+    if excluded_trade_subcategories:
+        trades_df = trades_df.filter(~pl.col("sub_category").is_in(sorted(excluded_trade_subcategories)))
     if trades_df.is_empty():
         logging.warning("No Trades matched the selected date range.")
         return None, None
@@ -295,6 +322,7 @@ def process_trades_ibkr(
         Col.currency,
         Col.buy_date,
         Col.trade_date,
+        "sub_category",
         "buy_exchange_rate",
         "sell_exchange_rate",
         "cost",
@@ -351,6 +379,7 @@ def process_cash_transactions_ibkr(
     start_date: date,
     end_date: date,
     extract_etf: bool = False,
+    excluded_cash_transaction_subcategories: set[str] | None = None,
 ) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
     """
     1. Load IBKR cash transactions from XML and normalize key columns/types.
@@ -368,6 +397,7 @@ def process_cash_transactions_ibkr(
         exchange_rates_df=exchange_rates_df,
         start_date=start_date,
         end_date=end_date,
+        excluded_cash_transaction_subcategories=excluded_cash_transaction_subcategories,
     )
     if pivoted_df is None or pivoted_df.is_empty():
         return None, None

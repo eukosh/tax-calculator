@@ -1,0 +1,1774 @@
+from __future__ import annotations
+
+from bisect import bisect_right
+from collections import defaultdict
+from copy import deepcopy
+from datetime import date, datetime
+from pathlib import Path
+
+import polars as pl
+
+from scripts.reporting_funds.ibkr_source import (
+    build_broker_dividend_events,
+    load_ibkr_etf_cash_dividend_rows,
+    load_ibkr_etf_dividend_accrual_rows,
+    load_ibkr_etf_trades,
+)
+from scripts.reporting_funds.models import (
+    BrokerDividendEvent,
+    IbkrTrade,
+    Lot,
+    OekbReport,
+    PayoutStateRow,
+    round_money,
+    round_qty,
+)
+from scripts.reporting_funds.oekb_csv import load_matching_oekb_reports, load_required_oekb_reports
+from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
+from src.currencies import ExchangeRates, ExchangeRatesCacheError
+
+NEGATIVE_DEEMED_DISTRIBUTION_IGNORE = "ignore_as_frozen_history"
+NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL = "apply_full"
+NEGATIVE_DEEMED_DISTRIBUTION_APPLY_PARTIAL = "apply_partial"
+NEGATIVE_DEEMED_DISTRIBUTION_BLOCK = "unresolved_block"
+NEGATIVE_DEEMED_DISTRIBUTION_APPLIED_HISTORICAL = "applied_historical_annual_cleanup"
+
+
+def build_fx_table(
+    start_date: date,
+    end_date: date,
+    raw_exchange_rates_path: str | Path,
+    currencies: tuple[str, ...],
+) -> dict[str, tuple[list[date], list[float]]]:
+    try:
+        exchange_rates = ExchangeRates(
+            start_date=start_date,
+            end_date=end_date,
+            currencies=currencies,
+            overwrite=False,
+            raw_file_path=str(raw_exchange_rates_path),
+        )
+    except ExchangeRatesCacheError:
+        exchange_rates = ExchangeRates(
+            start_date=start_date,
+            end_date=end_date,
+            currencies=currencies,
+            overwrite=True,
+            raw_file_path=str(raw_exchange_rates_path),
+        )
+
+    rates_df = exchange_rates.get_rates()
+    fx_table: dict[str, tuple[list[date], list[float]]] = {}
+    for currency in sorted(set(rates_df["currency"].to_list())):
+        currency_df = rates_df.filter(pl.col("currency") == currency).sort("rate_date")
+        fx_table[currency] = (currency_df["rate_date"].to_list(), currency_df["exchange_rate"].to_list())
+    return fx_table
+
+
+def get_fx_rate(fx_table: dict[str, tuple[list[date], list[float]]], currency: str, event_date: date) -> float:
+    if currency == "EUR":
+        return 1.0
+
+    if currency not in fx_table:
+        raise ValueError(f"Missing FX series for currency {currency}")
+
+    available_dates, available_rates = fx_table[currency]
+    index = bisect_right(available_dates, event_date) - 1
+    if index < 0:
+        raise ValueError(f"No FX rate available for {currency} on or before {event_date}")
+
+    matched_date = available_dates[index]
+    if (event_date - matched_date).days > EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET:
+        raise ValueError(
+            f"Closest FX rate for {currency} on {event_date} is too old: {matched_date} "
+            f"(>{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET} days)"
+        )
+
+    return float(available_rates[index])
+
+
+def build_buy_lot(trade: IbkrTrade, fx_table: dict[str, tuple[list[date], list[float]]]) -> Lot:
+    buy_fx = get_fx_rate(fx_table, trade.currency, trade.trade_date)
+    quantity = round_qty(trade.quantity)
+    original_cost_eur = round_money((quantity * trade.price_ccy) / buy_fx)
+    return Lot(
+        ticker=trade.ticker,
+        isin=trade.isin,
+        lot_id=f"{trade.ticker}:{trade.trade_date.isoformat()}:{trade.trade_id}",
+        buy_date=trade.trade_date,
+        original_quantity=quantity,
+        remaining_quantity=quantity,
+        currency=trade.currency,
+        buy_price_ccy=round_money(trade.price_ccy),
+        buy_fx_to_eur=round_money(buy_fx),
+        original_cost_eur=original_cost_eur,
+        account_id=trade.account_id,
+        source_trade_id=trade.trade_id,
+        source_statement_file=trade.source_statement_file,
+    )
+
+
+def load_ledger(path: str | Path) -> list[Lot]:
+    ledger_df = pl.read_csv(path)
+    lots: list[Lot] = []
+    for row in ledger_df.to_dicts():
+        lots.append(
+            Lot(
+                ticker=str(row["ticker"]),
+                isin=str(row["isin"]),
+                lot_id=str(row["lot_id"]),
+                buy_date=date.fromisoformat(str(row["buy_date"])),
+                original_quantity=round_qty(float(row["original_quantity"])),
+                remaining_quantity=round_qty(float(row["remaining_quantity"])),
+                currency=str(row["currency"]),
+                buy_price_ccy=round_money(float(row["buy_price_ccy"])),
+                buy_fx_to_eur=round_money(float(row["buy_fx_to_eur"])),
+                original_cost_eur=round_money(float(row["original_cost_eur"])),
+                cumulative_oekb_stepup_eur=round_money(float(row["cumulative_oekb_stepup_eur"])),
+                status=str(row.get("status") or "open"),
+                broker=str(row.get("broker") or "ibkr"),
+                account_id=str(row.get("account_id") or ""),
+                notes=str(row.get("notes") or ""),
+                last_adjustment_year=str(row.get("last_adjustment_year") or ""),
+                last_adjustment_reference=str(row.get("last_adjustment_reference") or ""),
+                last_sale_date=str(row.get("last_sale_date") or ""),
+                sold_quantity_ytd=round_qty(float(row.get("sold_quantity_ytd") or 0.0)),
+                source_trade_id=str(row.get("source_trade_id") or ""),
+                source_statement_file=str(row.get("source_statement_file") or ""),
+            )
+        )
+    return lots
+
+
+def load_payout_state(path: str | Path) -> dict[str, PayoutStateRow]:
+    payout_state_path = Path(path)
+    if not payout_state_path.exists():
+        return {}
+
+    payout_df = pl.read_csv(payout_state_path)
+    payout_state: dict[str, PayoutStateRow] = {}
+    for row in payout_df.to_dicts():
+        payout = PayoutStateRow(
+            payout_key=str(row["payout_key"]),
+            ticker=str(row["ticker"]),
+            isin=str(row["isin"]),
+            ex_date=date.fromisoformat(str(row["ex_date"])) if row.get("ex_date") else None,
+            pay_date=date.fromisoformat(str(row["pay_date"])),
+            quantity=round_qty(float(row["quantity"])),
+            currency=str(row["currency"]),
+            broker_gross_amount_ccy=round_money(float(row.get("broker_gross_amount_ccy") or 0.0)),
+            broker_net_amount_ccy=round_money(float(row.get("broker_net_amount_ccy") or 0.0)),
+            broker_tax_amount_ccy=round_money(float(row.get("broker_tax_amount_ccy") or 0.0)),
+            source_tax_year=int(row["source_tax_year"]),
+            status=str(row["status"]),
+            resolved_tax_year=str(row.get("resolved_tax_year") or ""),
+            resolved_by_report_year=str(row.get("resolved_by_report_year") or ""),
+            resolved_by_report_file=str(row.get("resolved_by_report_file") or ""),
+            resolution_mode=str(row.get("resolution_mode") or ""),
+            action_id=str(row.get("action_id") or ""),
+            source_statement_file=str(row.get("source_statement_file") or ""),
+            notes=str(row.get("notes") or ""),
+        )
+        payout_state[payout.payout_key] = payout
+    return payout_state
+
+
+def payout_state_to_df(rows: list[PayoutStateRow]) -> pl.DataFrame:
+    schema = {
+        "payout_key": pl.String,
+        "ticker": pl.String,
+        "isin": pl.String,
+        "ex_date": pl.String,
+        "pay_date": pl.String,
+        "quantity": pl.Float64,
+        "currency": pl.String,
+        "broker_gross_amount_ccy": pl.Float64,
+        "broker_net_amount_ccy": pl.Float64,
+        "broker_tax_amount_ccy": pl.Float64,
+        "source_tax_year": pl.Int64,
+        "status": pl.String,
+        "resolved_tax_year": pl.String,
+        "resolved_by_report_year": pl.String,
+        "resolved_by_report_file": pl.String,
+        "resolution_mode": pl.String,
+        "action_id": pl.String,
+        "source_statement_file": pl.String,
+        "notes": pl.String,
+    }
+    if not rows:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame([row.to_record() for row in rows]).sort(["ticker", "pay_date", "payout_key"])
+
+
+def prepare_lots_for_new_year(lots: list[Lot]) -> list[Lot]:
+    prepared_lots = deepcopy(lots)
+    for lot in prepared_lots:
+        lot.sold_quantity_ytd = 0.0
+    return prepared_lots
+
+
+def _apply_sell(
+    lots: list[Lot],
+    trade: IbkrTrade,
+    fx_table: dict[str, tuple[list[date], list[float]]],
+    sale_rows: list[dict[str, object]] | None,
+    track_ytd: bool,
+) -> None:
+    quantity_left = round_qty(trade.quantity)
+    sale_fx = get_fx_rate(fx_table, trade.currency, trade.trade_date)
+
+    for lot in lots:
+        if quantity_left <= 0:
+            break
+        if lot.isin != trade.isin or lot.remaining_quantity <= 0:
+            continue
+
+        quantity_from_lot = min(lot.remaining_quantity, quantity_left)
+        fraction = quantity_from_lot / lot.remaining_quantity
+        original_basis_eur = round_money(lot.original_cost_eur * fraction)
+        stepup_basis_eur = round_money(lot.cumulative_oekb_stepup_eur * fraction)
+        taxable_basis_eur = round_money(original_basis_eur + stepup_basis_eur)
+        taxable_proceeds_eur = round_money((quantity_from_lot * trade.price_ccy) / sale_fx)
+
+        if sale_rows is not None:
+            sale_rows.append(
+                {
+                    "sale_date": trade.trade_date.isoformat(),
+                    "ticker": trade.ticker,
+                    "isin": trade.isin,
+                    "quantity_sold": round_qty(trade.quantity),
+                    "sale_price_ccy": round_money(trade.price_ccy),
+                    "sale_fx": round_money(sale_fx),
+                    "lot_id": lot.lot_id,
+                    "lot_buy_date": lot.buy_date.isoformat(),
+                    "quantity_from_lot": round_qty(quantity_from_lot),
+                    "taxable_proceeds_eur": taxable_proceeds_eur,
+                    "taxable_original_basis_eur": original_basis_eur,
+                    "taxable_stepup_basis_eur": stepup_basis_eur,
+                    "taxable_total_basis_eur": taxable_basis_eur,
+                    "taxable_gain_loss_eur": round_money(taxable_proceeds_eur - taxable_basis_eur),
+                    "notes": "FIFO sale result uses original EUR basis plus cumulative OeKB acquisition-cost corrections.",
+                }
+            )
+
+        lot.remaining_quantity = round_qty(lot.remaining_quantity - quantity_from_lot)
+        lot.original_cost_eur = round_money(lot.original_cost_eur - original_basis_eur)
+        lot.cumulative_oekb_stepup_eur = round_money(lot.cumulative_oekb_stepup_eur - stepup_basis_eur)
+        lot.status = "closed" if lot.remaining_quantity == 0 else "partially_sold"
+        if track_ytd:
+            lot.sold_quantity_ytd = round_qty(lot.sold_quantity_ytd + quantity_from_lot)
+            lot.last_sale_date = trade.trade_date.isoformat()
+
+        quantity_left = round_qty(quantity_left - quantity_from_lot)
+
+    if quantity_left > 0:
+        raise ValueError(f"Sell of {trade.ticker} on {trade.trade_date} exceeds available quantity")
+
+
+def apply_trade(
+    lots: list[Lot],
+    trade: IbkrTrade,
+    fx_table: dict[str, tuple[list[date], list[float]]],
+    sale_rows: list[dict[str, object]] | None = None,
+    track_ytd: bool = True,
+) -> None:
+    if trade.operation == "buy":
+        lots.append(build_buy_lot(trade, fx_table))
+        return
+    _apply_sell(lots, trade, fx_table, sale_rows=sale_rows, track_ytd=track_ytd)
+
+
+def _eligible_lots(lots: list[Lot], isin: str, eligibility_date: date) -> list[Lot]:
+    return [lot for lot in lots if lot.isin == isin and lot.remaining_quantity > 0 and lot.buy_date <= eligibility_date]
+
+
+def _sum_shares(lots: list[Lot]) -> float:
+    return round_qty(sum(lot.remaining_quantity for lot in lots))
+
+
+def _ensure_lot_compatibility(lots: list[Lot], report: OekbReport) -> None:
+    if any(lot.currency != report.currency for lot in lots):
+        raise ValueError(f"OeKB currency {report.currency} does not match ledger lots for {report.ticker}")
+
+
+def apply_basis_correction(
+    lots: list[Lot],
+    report: OekbReport,
+    tax_year: int,
+    fx_table: dict[str, tuple[list[date], list[float]]],
+    *,
+    quantity_override: float | None = None,
+    note_prefix: str = "",
+) -> dict[str, object]:
+    if report.is_ausschuettungsmeldung and not (report.ex_tag or report.ausschuettungstag):
+        raise ValueError(f"OeKB distribution report for {report.ticker} is missing both Ex-Tag and Ausschüttungstag")
+
+    eligibility_date = report.eligibility_date
+    effective_date = report.ausschuettungstag or report.meldedatum
+    eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
+    _ensure_lot_compatibility(eligible_lots, report)
+
+    shares_held = _sum_shares(eligible_lots) if quantity_override is None else round_qty(quantity_override)
+    fx_to_eur = get_fx_rate(fx_table, report.currency, effective_date)
+    basis_stepup_total_ccy = round_money(report.acquisition_cost_correction_per_share_ccy * shares_held)
+    basis_stepup_total_eur = round_money(basis_stepup_total_ccy / fx_to_eur)
+
+    allocated_total = 0.0
+    for index, lot in enumerate(eligible_lots):
+        if shares_held == 0 or not eligible_lots:
+            stepup_eur = 0.0
+        elif index == len(eligible_lots) - 1:
+            stepup_eur = round_money(basis_stepup_total_eur - allocated_total)
+        else:
+            total_remaining_quantity = _sum_shares(eligible_lots)
+            if total_remaining_quantity == 0:
+                stepup_eur = 0.0
+            else:
+                stepup_eur = round_money(basis_stepup_total_eur * (lot.remaining_quantity / total_remaining_quantity))
+            allocated_total += stepup_eur
+
+        lot.cumulative_oekb_stepup_eur = round_money(lot.cumulative_oekb_stepup_eur + stepup_eur)
+        lot.last_adjustment_year = str(tax_year)
+        lot.last_adjustment_reference = f"{report.ticker}:{effective_date.isoformat()}:10289"
+        lot.add_note(
+            f"{note_prefix}{tax_year} OeKB basis correction on {effective_date.isoformat()} "
+            f"(eligible {eligibility_date.isoformat()}, delta {stepup_eur:.6f} EUR)"
+        )
+
+    return {
+        "tax_year": tax_year,
+        "ticker": report.ticker,
+        "isin": report.isin,
+        "report_type": "Ausschüttungsmeldung" if report.is_ausschuettungsmeldung else "Jahresmeldung",
+        "eligibility_date": eligibility_date.isoformat(),
+        "effective_date": effective_date.isoformat(),
+        "currency": report.currency,
+        "acquisition_cost_correction_per_share_ccy": round_money(report.acquisition_cost_correction_per_share_ccy),
+        "shares_held_on_eligibility_date": shares_held,
+        "basis_stepup_total_ccy": basis_stepup_total_ccy,
+        "basis_stepup_total_eur": basis_stepup_total_eur,
+        "fx_to_eur": round_money(fx_to_eur),
+        "source_file": report.source_file,
+        "notes": (
+            (f"{note_prefix.strip()} " if note_prefix else "")
+            + ("" if shares_held > 0 else "No eligible shares were held on the eligibility date.")
+        ).strip(),
+    }
+
+
+def _upsert_payout_state_row(
+    payout_state: dict[str, PayoutStateRow],
+    event: BrokerDividendEvent,
+    *,
+    historical_lock_start_date: date,
+) -> None:
+    existing = payout_state.get(event.event_id)
+    status = "historical_locked_pre_2025" if event.pay_date < historical_lock_start_date else "unresolved_open"
+    notes = event.matching_notes
+    if existing is None:
+        payout_state[event.event_id] = PayoutStateRow(
+            payout_key=event.event_id,
+            ticker=event.ticker,
+            isin=event.isin,
+            ex_date=event.ex_date,
+            pay_date=event.pay_date,
+            quantity=event.quantity,
+            currency=event.currency,
+            broker_gross_amount_ccy=round_money(event.gross_amount or 0.0),
+            broker_net_amount_ccy=round_money(event.net_amount or 0.0),
+            broker_tax_amount_ccy=round_money(event.tax or 0.0),
+            source_tax_year=event.pay_date.year,
+            status=status,
+            resolved_tax_year=str(event.pay_date.year) if status == "historical_locked_pre_2025" else "",
+            resolution_mode=status if status == "historical_locked_pre_2025" else "",
+            action_id=event.action_id,
+            source_statement_file=event.source_statement_file,
+            notes=notes,
+        )
+        return
+
+    existing.ticker = event.ticker
+    existing.isin = event.isin
+    existing.ex_date = event.ex_date
+    existing.pay_date = event.pay_date
+    existing.quantity = round_qty(event.quantity)
+    existing.currency = event.currency
+    existing.broker_gross_amount_ccy = round_money(event.gross_amount or 0.0)
+    existing.broker_net_amount_ccy = round_money(event.net_amount or 0.0)
+    existing.broker_tax_amount_ccy = round_money(event.tax or 0.0)
+    existing.source_tax_year = event.pay_date.year
+    existing.action_id = event.action_id
+    existing.source_statement_file = event.source_statement_file
+    if notes and notes not in existing.notes:
+        existing.add_note(notes)
+    if existing.pay_date < historical_lock_start_date:
+        existing.status = "historical_locked_pre_2025"
+        existing.resolved_tax_year = str(existing.pay_date.year)
+        existing.resolution_mode = "historical_locked_pre_2025"
+
+
+def _mark_payout_resolved(
+    payout: PayoutStateRow,
+    *,
+    status: str,
+    tax_year: int,
+    report: OekbReport,
+    resolution_mode: str,
+    notes: str,
+) -> None:
+    payout.status = status
+    payout.resolved_tax_year = str(tax_year)
+    payout.resolved_by_report_year = str(report.meldedatum.year)
+    payout.resolved_by_report_file = report.source_file
+    payout.resolution_mode = resolution_mode
+    payout.add_note(notes)
+
+
+def _mark_payout_resolved_without_report(
+    payout: PayoutStateRow,
+    *,
+    status: str,
+    tax_year: int,
+    resolution_mode: str,
+    notes: str,
+) -> None:
+    payout.status = status
+    payout.resolved_tax_year = str(tax_year)
+    payout.resolved_by_report_year = ""
+    payout.resolved_by_report_file = ""
+    payout.resolution_mode = resolution_mode
+    payout.add_note(notes)
+
+
+def _build_broker_event_by_id(broker_events: list[BrokerDividendEvent]) -> dict[str, BrokerDividendEvent]:
+    return {event.event_id: event for event in broker_events}
+
+
+def _match_distribution_report_to_payouts(
+    payout_rows: list[PayoutStateRow],
+    reports: list[OekbReport],
+    *,
+    historical_lock_start_date: date,
+    tax_year: int,
+) -> list[dict[str, object]]:
+    resolution_rows: list[dict[str, object]] = []
+    distribution_reports = [report for report in reports if report.is_ausschuettungsmeldung]
+    for payout in payout_rows:
+        if payout.pay_date < historical_lock_start_date or payout.pay_date.year != tax_year:
+            continue
+        matches = [
+            report
+            for report in distribution_reports
+            if report.isin == payout.isin
+            and (report.ausschuettungstag or report.meldedatum) == payout.pay_date
+            and (report.ex_tag is None or payout.ex_date is None or report.ex_tag == payout.ex_date)
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple OeKB distribution reports matched payout {payout.ticker} ({payout.isin}) "
+                f"on {payout.pay_date.isoformat()}."
+            )
+        if len(matches) != 1:
+            continue
+        report = matches[0]
+        _mark_payout_resolved(
+            payout,
+            status="resolved_same_year_distribution",
+            tax_year=tax_year,
+            report=report,
+            resolution_mode="matched_same_year_distribution",
+            notes="resolved by same-year Ausschüttungsmeldung; matched by actionID-aware broker payout event",
+        )
+        resolution_rows.append(
+            {
+                "payout_key": payout.payout_key,
+                "ticker": payout.ticker,
+                "isin": payout.isin,
+                "pay_date": payout.pay_date.isoformat(),
+                "report_year": report.meldedatum.year,
+                "resolution_mode": payout.resolution_mode,
+                "status": payout.status,
+                "notes": payout.notes,
+            }
+        )
+    return resolution_rows
+
+
+def _quantity_for_10595_total(
+    lots: list[Lot],
+    report: OekbReport,
+    *,
+    target_tax_year: int,
+) -> float:
+    eligibility_date = report.meldedatum if report.meldedatum.year == target_tax_year else date(target_tax_year, 12, 31)
+    eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
+    _ensure_lot_compatibility(eligible_lots, report)
+    return _sum_shares(eligible_lots)
+
+
+def _resolve_annual_10595_reports(
+    payout_rows: list[PayoutStateRow],
+    annual_reports: list[OekbReport],
+    *,
+    target_tax_year: int,
+    historical_lock_start_date: date,
+    lots_for_quantity: list[Lot],
+    fx_table: dict[str, tuple[list[date], list[float]]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    income_rows: list[dict[str, object]] = []
+    resolution_rows: list[dict[str, object]] = []
+
+    for report in annual_reports:
+        if report.non_reported_distribution_per_share_ccy == 0.0:
+            continue
+        period = report.annual_reconciliation_period
+        if period is None:
+            raise ValueError(
+                f"OeKB annual report {report.source_file} has 10595 > 0 but no Meldezeitraum or Geschäftsjahres period metadata."
+            )
+
+        period_start, period_end = period
+        in_period_rows = [
+            payout
+            for payout in payout_rows
+            if payout.isin == report.isin and period_start <= payout.pay_date <= period_end
+        ]
+        target_rows = [payout for payout in in_period_rows if payout.pay_date.year == target_tax_year]
+        unresolved_target_rows = [payout for payout in target_rows if payout.status == "unresolved_open"]
+        historical_rows = [payout for payout in in_period_rows if payout.pay_date < historical_lock_start_date]
+
+        if not unresolved_target_rows and historical_rows:
+            for payout in historical_rows:
+                payout.status = "ignored_pre_2025_reference"
+                payout.resolution_mode = "ignored_pre_2025_reference"
+                payout.resolved_by_report_year = str(report.meldedatum.year)
+                payout.resolved_by_report_file = report.source_file
+                payout.add_note("later annual report referenced locked pre-2025 payout; ignored for tax and basis")
+                resolution_rows.append(
+                    {
+                        "payout_key": payout.payout_key,
+                        "ticker": payout.ticker,
+                        "isin": payout.isin,
+                        "pay_date": payout.pay_date.isoformat(),
+                        "report_year": report.meldedatum.year,
+                        "resolution_mode": payout.resolution_mode,
+                        "status": payout.status,
+                        "notes": payout.notes,
+                    }
+                )
+            continue
+
+        if not target_rows and not historical_rows:
+            continue
+
+        if not unresolved_target_rows:
+            raise ValueError(
+                f"Unable to reconcile OeKB code 10595 for {report.ticker} from {report.source_file}. "
+                "No unresolved ETF broker payout events were found in the report period."
+            )
+
+        total_quantity = _quantity_for_10595_total(lots_for_quantity, report, target_tax_year=target_tax_year)
+        total_ccy = round_money(report.non_reported_distribution_per_share_ccy * total_quantity)
+        allocations = _allocate_total_ccy(
+            total_ccy,
+            [
+                BrokerDividendEvent(
+                    ticker=payout.ticker,
+                    isin=payout.isin,
+                    currency=payout.currency,
+                    ex_date=payout.ex_date,
+                    pay_date=payout.pay_date,
+                    quantity=payout.quantity,
+                    gross_rate=None,
+                    gross_amount=payout.broker_gross_amount_ccy,
+                    net_amount=payout.broker_net_amount_ccy,
+                    tax=payout.broker_tax_amount_ccy,
+                    has_po=False,
+                    has_re=False,
+                    action_id=payout.action_id,
+                    source_statement_file=payout.source_statement_file,
+                )
+                for payout in unresolved_target_rows
+            ],
+        )
+
+        for payout, allocated_ccy in zip(unresolved_target_rows, allocations, strict=True):
+            payout_status = (
+                "resolved_later_year_annual_report"
+                if report.meldedatum.year > target_tax_year
+                else "resolved_later_year_annual_report"
+            )
+            resolution_note = (
+                "resolved by next-year annual 10595 back to prior payout year"
+                if report.meldedatum.year > target_tax_year
+                else "resolved by annual 10595 in target tax year"
+            )
+            _mark_payout_resolved(
+                payout,
+                status=payout_status,
+                tax_year=target_tax_year,
+                report=report,
+                resolution_mode="matched_annual_10595",
+                notes=resolution_note,
+            )
+            resolution_rows.append(
+                {
+                    "payout_key": payout.payout_key,
+                    "ticker": payout.ticker,
+                    "isin": payout.isin,
+                    "pay_date": payout.pay_date.isoformat(),
+                    "report_year": report.meldedatum.year,
+                    "resolution_mode": payout.resolution_mode,
+                    "status": payout.status,
+                    "notes": payout.notes,
+                }
+            )
+            income_rows.append(
+                {
+                    "event_type": "oekb_non_reported_distribution_10595",
+                    "tax_year": target_tax_year,
+                    "event_date": payout.pay_date.isoformat(),
+                    "eligibility_date": payout.ex_date.isoformat() if payout.ex_date else payout.pay_date.isoformat(),
+                    "ticker": payout.ticker,
+                    "isin": payout.isin,
+                    "currency": report.currency,
+                    "quantity": round_qty(payout.quantity),
+                    "amount_per_share_ccy": round_money(allocated_ccy / payout.quantity) if payout.quantity else 0.0,
+                    "amount_total_ccy": round_money(allocated_ccy),
+                    "amount_total_eur": round_money(allocated_ccy / get_fx_rate(fx_table, report.currency, payout.pay_date)),
+                    "creditable_foreign_tax_total_ccy": 0.0,
+                    "creditable_foreign_tax_total_eur": 0.0,
+                    "broker_gross_amount_ccy": round_money(payout.broker_gross_amount_ccy),
+                    "broker_net_amount_ccy": round_money(payout.broker_net_amount_ccy),
+                    "broker_tax_amount_ccy": round_money(payout.broker_tax_amount_ccy),
+                    "matched_broker_event_id": payout.payout_key,
+                    "source_file": report.source_file,
+                    "notes": (
+                        f"{resolution_note}; allocation basis uses broker gross payout amounts within report period "
+                        f"{period_start.isoformat()}..{period_end.isoformat()}"
+                    ),
+                }
+            )
+
+    return income_rows, resolution_rows
+
+
+def _resolve_broker_cash_payouts_outside_annual_periods(
+    payout_rows: list[PayoutStateRow],
+    annual_reports: list[OekbReport],
+    *,
+    tax_year: int,
+    historical_lock_start_date: date,
+) -> list[dict[str, object]]:
+    resolution_rows: list[dict[str, object]] = []
+    annual_reports_by_isin: dict[str, list[OekbReport]] = defaultdict(list)
+    for report in annual_reports:
+        annual_reports_by_isin[report.isin].append(report)
+
+    for payout in payout_rows:
+        if payout.pay_date.year != tax_year or payout.pay_date < historical_lock_start_date:
+            continue
+        if payout.status != "unresolved_open":
+            continue
+
+        same_isin_reports = annual_reports_by_isin.get(payout.isin, [])
+        if not same_isin_reports:
+            continue
+
+        covered_by_annual_period = any(
+            period_start <= payout.pay_date <= period_end
+            for report in same_isin_reports
+            for period_start, period_end in [report.annual_reconciliation_period]
+            if report.annual_reconciliation_period is not None
+        )
+        if covered_by_annual_period:
+            continue
+
+        _mark_payout_resolved_without_report(
+            payout,
+            status="resolved_broker_cash_outside_oekb_period",
+            tax_year=tax_year,
+            resolution_mode="broker_cash_outside_oekb_period",
+            notes=(
+                "kept as broker cash payout because no OeKB annual report period covers the pay date; "
+                "annual OeKB report remains authoritative for deemed distributed income, basis correction, "
+                "and creditable foreign tax"
+            ),
+        )
+        resolution_rows.append(
+            {
+                "payout_key": payout.payout_key,
+                "ticker": payout.ticker,
+                "isin": payout.isin,
+                "pay_date": payout.pay_date.isoformat(),
+                "report_year": None,
+                "resolution_mode": payout.resolution_mode,
+                "status": payout.status,
+                "notes": payout.notes,
+            }
+        )
+
+    return resolution_rows
+
+
+def _build_broker_dividend_row(event: BrokerDividendEvent, fx_table: dict[str, tuple[list[date], list[float]]]) -> dict[str, object]:
+    fx_to_eur = get_fx_rate(fx_table, event.currency, event.pay_date)
+    gross_amount_ccy = round_money(event.gross_amount or 0.0)
+    net_amount_ccy = round_money(event.net_amount or 0.0)
+    tax_ccy = round_money(event.tax or 0.0)
+    notes = f"Collapsed broker accrual lifecycle has_po={event.has_po} has_re={event.has_re}; {event.matching_notes}".strip("; ")
+    if tax_ccy != 0.0:
+        notes = (
+            f"{notes}; broker withholding retained as audit-only evidence; "
+            "OeKB annual report determines ETF creditable foreign tax"
+        )
+    return {
+        "event_type": "broker_dividend_event",
+        "tax_year": event.pay_date.year,
+        "event_date": event.pay_date.isoformat(),
+        "eligibility_date": event.ex_date.isoformat() if event.ex_date else "",
+        "ticker": event.ticker,
+        "isin": event.isin,
+        "currency": event.currency,
+        "quantity": round_qty(event.quantity),
+        "amount_per_share_ccy": round_money(event.gross_rate or 0.0),
+        "amount_total_ccy": gross_amount_ccy,
+        "amount_total_eur": round_money(gross_amount_ccy / fx_to_eur),
+        "creditable_foreign_tax_total_ccy": 0.0,
+        "creditable_foreign_tax_total_eur": 0.0,
+        "broker_gross_amount_ccy": gross_amount_ccy,
+        "broker_net_amount_ccy": net_amount_ccy,
+        "broker_tax_amount_ccy": tax_ccy,
+        "matched_broker_event_id": event.event_id,
+        "source_file": event.source_statement_file,
+        "notes": notes,
+    }
+
+
+def _select_explicit_distribution_match(report: OekbReport, broker_events: list[BrokerDividendEvent]) -> BrokerDividendEvent:
+    payout_date = report.ausschuettungstag or report.meldedatum
+    matches = [
+        event
+        for event in broker_events
+        if event.isin == report.isin
+        and event.pay_date == payout_date
+        and (report.ex_tag is None or event.ex_date is None or event.ex_date == report.ex_tag)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one broker dividend accrual match for {report.ticker} on {payout_date.isoformat()}, "
+            f"found {len(matches)}"
+        )
+    return matches[0]
+
+
+def _select_non_reported_distribution_matches(
+    report: OekbReport,
+    broker_events: list[BrokerDividendEvent],
+    tax_year: int,
+) -> list[BrokerDividendEvent]:
+    same_isin_events = [event for event in broker_events if event.isin == report.isin]
+    period = report.annual_reconciliation_period
+    if period is not None:
+        period_start, period_end = period
+        matches = [event for event in same_isin_events if period_start <= event.pay_date <= period_end]
+        if matches:
+            return matches
+
+    matches = [event for event in same_isin_events if event.pay_date.year == tax_year]
+    if not matches:
+        raise ValueError(
+            f"Unable to reconcile OeKB code 10595 for {report.ticker}. "
+            "No ETF broker payout events were found in the matching report period or tax year."
+        )
+    return matches
+
+
+def _allocate_total_ccy(total_ccy: float, broker_events: list[BrokerDividendEvent]) -> list[float]:
+    if not broker_events:
+        return []
+
+    weights = [event.gross_amount or 0.0 for event in broker_events]
+    if sum(weights) <= 0:
+        weights = [event.quantity for event in broker_events]
+
+    total_weight = sum(weights)
+    allocations: list[float] = []
+    allocated = 0.0
+    for index, weight in enumerate(weights):
+        if total_weight <= 0:
+            allocation = 0.0
+        elif index == len(weights) - 1:
+            allocation = round_money(total_ccy - allocated)
+        else:
+            allocation = round_money(total_ccy * (weight / total_weight))
+            allocated += allocation
+        allocations.append(allocation)
+    return allocations
+
+
+def build_income_rows_for_report(
+    lots: list[Lot],
+    report: OekbReport,
+    tax_year: int,
+    fx_table: dict[str, tuple[list[date], list[float]]],
+    broker_events: list[BrokerDividendEvent],
+    *,
+    quantity_override: float | None = None,
+    note_prefix: str = "",
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    matched_distribution_event: BrokerDividendEvent | None = None
+
+    def add_row(
+        *,
+        event_type: str,
+        event_date: date,
+        eligibility_date: date,
+        quantity: float,
+        amount_per_share_ccy: float,
+        amount_total_ccy: float,
+        creditable_foreign_tax_per_share_ccy: float = 0.0,
+        creditable_foreign_tax_total_ccy: float = 0.0,
+        matched_broker_event_id: str = "",
+        notes: str = "",
+    ) -> None:
+        fx_to_eur = get_fx_rate(fx_table, report.currency, event_date)
+        rows.append(
+            {
+                "event_type": event_type,
+                "tax_year": tax_year,
+                "event_date": event_date.isoformat(),
+                "eligibility_date": eligibility_date.isoformat(),
+                "ticker": report.ticker,
+                "isin": report.isin,
+                "currency": report.currency,
+                "quantity": round_qty(quantity),
+                "amount_per_share_ccy": round_money(amount_per_share_ccy),
+                "amount_total_ccy": round_money(amount_total_ccy),
+                "amount_total_eur": round_money(amount_total_ccy / fx_to_eur),
+                "creditable_foreign_tax_total_ccy": round_money(creditable_foreign_tax_total_ccy),
+                "creditable_foreign_tax_total_eur": round_money(creditable_foreign_tax_total_ccy / fx_to_eur),
+                "broker_gross_amount_ccy": 0.0,
+                "broker_net_amount_ccy": 0.0,
+                "broker_tax_amount_ccy": 0.0,
+                "matched_broker_event_id": matched_broker_event_id,
+                "source_file": report.source_file,
+                "notes": notes,
+            }
+        )
+
+    def resolve_report_event_timing() -> tuple[date, date, str]:
+        nonlocal matched_distribution_event
+        if report.is_ausschuettungsmeldung:
+            if matched_distribution_event is None:
+                matched_distribution_event = _select_explicit_distribution_match(report, broker_events)
+            event_date = matched_distribution_event.pay_date
+            eligibility_date = report.ex_tag or matched_distribution_event.ex_date or matched_distribution_event.pay_date
+            return event_date, eligibility_date, matched_distribution_event.event_id
+
+        return report.meldedatum, report.meldedatum, ""
+
+    if report.reported_distribution_per_share_ccy != 0.0:
+        event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
+        eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
+        _ensure_lot_compatibility(eligible_lots, report)
+        quantity = _sum_shares(eligible_lots)
+        add_row(
+            event_type="oekb_reported_distribution_10286",
+            event_date=event_date,
+            eligibility_date=eligibility_date,
+            quantity=quantity,
+            amount_per_share_ccy=report.reported_distribution_per_share_ccy,
+            amount_total_ccy=round_money(report.reported_distribution_per_share_ccy * quantity),
+            matched_broker_event_id=matched_broker_event_id,
+            notes="Explicit OeKB distribution matched to broker dividend accrual event.",
+        )
+
+    if report.age_per_share_ccy != 0.0:
+        event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
+        eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
+        _ensure_lot_compatibility(eligible_lots, report)
+        quantity = _sum_shares(eligible_lots) if quantity_override is None else round_qty(quantity_override)
+        add_row(
+            event_type="oekb_deemed_distribution_10287",
+            event_date=event_date,
+            eligibility_date=eligibility_date,
+            quantity=quantity,
+            amount_per_share_ccy=report.age_per_share_ccy,
+            amount_total_ccy=round_money(report.age_per_share_ccy * quantity),
+            matched_broker_event_id=matched_broker_event_id,
+            notes=(
+                f"{note_prefix}"
+                f"{'Distribution-report' if report.is_ausschuettungsmeldung else 'Annual'} "
+                "deemed distribution from OeKB report."
+            ).strip(),
+        )
+
+    if report.creditable_foreign_tax_per_share_ccy != 0.0:
+        event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
+        eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
+        _ensure_lot_compatibility(eligible_lots, report)
+        quantity = _sum_shares(eligible_lots) if quantity_override is None else round_qty(quantity_override)
+        credit_total_ccy = round_money(report.creditable_foreign_tax_per_share_ccy * quantity)
+        add_row(
+            event_type="oekb_creditable_foreign_tax_10288",
+            event_date=event_date,
+            eligibility_date=eligibility_date,
+            quantity=quantity,
+            amount_per_share_ccy=0.0,
+            amount_total_ccy=0.0,
+            creditable_foreign_tax_per_share_ccy=report.creditable_foreign_tax_per_share_ccy,
+            creditable_foreign_tax_total_ccy=credit_total_ccy,
+            matched_broker_event_id=matched_broker_event_id,
+            notes=(
+                f"{note_prefix}"
+                f"{'Distribution-report' if report.is_ausschuettungsmeldung else 'Annual'} "
+                "creditable foreign tax from OeKB report."
+            ).strip(),
+        )
+
+    return rows
+
+
+def lots_to_df(lots: list[Lot]) -> pl.DataFrame:
+    schema = {
+        "ticker": pl.String,
+        "isin": pl.String,
+        "lot_id": pl.String,
+        "buy_date": pl.String,
+        "original_quantity": pl.Float64,
+        "remaining_quantity": pl.Float64,
+        "currency": pl.String,
+        "buy_price_ccy": pl.Float64,
+        "buy_fx_to_eur": pl.Float64,
+        "original_cost_eur": pl.Float64,
+        "cumulative_oekb_stepup_eur": pl.Float64,
+        "adjusted_basis_eur": pl.Float64,
+        "status": pl.String,
+        "broker": pl.String,
+        "account_id": pl.String,
+        "notes": pl.String,
+        "last_adjustment_year": pl.String,
+        "last_adjustment_reference": pl.String,
+        "last_sale_date": pl.String,
+        "sold_quantity_ytd": pl.Float64,
+        "source_trade_id": pl.String,
+        "source_statement_file": pl.String,
+    }
+    if not lots:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame([lot.to_record() for lot in lots]).sort(["ticker", "buy_date", "lot_id"])
+
+
+def basis_adjustments_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
+    schema = {
+        "tax_year": pl.Int64,
+        "ticker": pl.String,
+        "isin": pl.String,
+        "report_type": pl.String,
+        "eligibility_date": pl.String,
+        "effective_date": pl.String,
+        "currency": pl.String,
+        "acquisition_cost_correction_per_share_ccy": pl.Float64,
+        "shares_held_on_eligibility_date": pl.Float64,
+        "basis_stepup_total_ccy": pl.Float64,
+        "basis_stepup_total_eur": pl.Float64,
+        "fx_to_eur": pl.Float64,
+        "source_file": pl.String,
+        "notes": pl.String,
+    }
+    if not rows:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(rows).sort(["ticker", "tax_year", "effective_date", "report_type"])
+
+
+def income_events_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
+    schema = {
+        "event_type": pl.String,
+        "tax_year": pl.Int64,
+        "event_date": pl.String,
+        "eligibility_date": pl.String,
+        "ticker": pl.String,
+        "isin": pl.String,
+        "currency": pl.String,
+        "quantity": pl.Float64,
+        "amount_per_share_ccy": pl.Float64,
+        "amount_total_ccy": pl.Float64,
+        "amount_total_eur": pl.Float64,
+        "creditable_foreign_tax_total_ccy": pl.Float64,
+        "creditable_foreign_tax_total_eur": pl.Float64,
+        "broker_gross_amount_ccy": pl.Float64,
+        "broker_net_amount_ccy": pl.Float64,
+        "broker_tax_amount_ccy": pl.Float64,
+        "matched_broker_event_id": pl.String,
+        "source_file": pl.String,
+        "notes": pl.String,
+    }
+    if not rows:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(rows).sort(["ticker", "tax_year", "event_date", "event_type"])
+
+
+def payout_resolution_events_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
+    schema = {
+        "payout_key": pl.String,
+        "ticker": pl.String,
+        "isin": pl.String,
+        "pay_date": pl.String,
+        "report_year": pl.Int64,
+        "resolution_mode": pl.String,
+        "status": pl.String,
+        "notes": pl.String,
+    }
+    if not rows:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(rows).sort(["ticker", "pay_date", "resolution_mode"])
+
+
+def negative_deemed_distribution_review_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
+    schema = {
+        "report_key": pl.String,
+        "ticker": pl.String,
+        "isin": pl.String,
+        "report_date": pl.String,
+        "decision": pl.String,
+        "status": pl.String,
+        "eligible_quantity_used": pl.Float64,
+        "quantity_held_on_report_date": pl.Float64,
+        "candidate_payout_count": pl.Int64,
+        "candidate_payout_dates": pl.String,
+        "candidate_payout_quantities": pl.String,
+        "candidate_payout_gross_amounts_ccy": pl.String,
+        "deemed_distributed_income_per_share_ccy": pl.Float64,
+        "non_reported_distribution_per_share_ccy": pl.Float64,
+        "creditable_foreign_tax_per_share_ccy": pl.Float64,
+        "basis_correction_per_share_ccy": pl.Float64,
+        "basis_age_component_per_share_ccy": pl.Float64,
+        "basis_distribution_component_per_share_ccy": pl.Float64,
+        "capital_repayment_per_share_ccy": pl.Float64,
+        "withheld_tax_on_non_reported_distributions_per_share_ccy": pl.Float64,
+        "source_file": pl.String,
+        "notes": pl.String,
+    }
+    if not rows:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(rows).sort(["ticker", "report_date"])
+
+
+def sales_to_df(sale_rows: list[dict[str, object]]) -> pl.DataFrame:
+    schema = {
+        "sale_date": pl.String,
+        "ticker": pl.String,
+        "isin": pl.String,
+        "quantity_sold": pl.Float64,
+        "sale_price_ccy": pl.Float64,
+        "sale_fx": pl.Float64,
+        "lot_id": pl.String,
+        "lot_buy_date": pl.String,
+        "quantity_from_lot": pl.Float64,
+        "taxable_proceeds_eur": pl.Float64,
+        "taxable_original_basis_eur": pl.Float64,
+        "taxable_stepup_basis_eur": pl.Float64,
+        "taxable_total_basis_eur": pl.Float64,
+        "taxable_gain_loss_eur": pl.Float64,
+        "notes": pl.String,
+    }
+    if not sale_rows:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(sale_rows).sort(["ticker", "sale_date", "lot_buy_date", "lot_id"])
+
+
+def write_csv(df: pl.DataFrame, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.write_csv(output_path)
+
+
+def write_summary(
+    summary_path: Path,
+    tax_year: int,
+    next_period_ledger_path: Path,
+    next_period_payout_state_path: Path,
+    next_period_negative_override_path: Path,
+    ledger_df: pl.DataFrame,
+    income_events_df: pl.DataFrame,
+    basis_adjustments_df: pl.DataFrame,
+    sales_df: pl.DataFrame,
+    payout_state_df: pl.DataFrame,
+    negative_review_df: pl.DataFrame,
+) -> None:
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    income_total_eur = income_events_df["amount_total_eur"].sum() if income_events_df.height else 0.0
+    foreign_tax_total_eur = (
+        income_events_df["creditable_foreign_tax_total_eur"].sum() if income_events_df.height else 0.0
+    )
+    basis_total_eur = basis_adjustments_df["basis_stepup_total_eur"].sum() if basis_adjustments_df.height else 0.0
+    sales_total_eur = sales_df["taxable_gain_loss_eur"].sum() if sales_df.height else 0.0
+    unresolved_count = (
+        payout_state_df.filter((pl.col("pay_date").str.slice(0, 4) == str(tax_year)) & (pl.col("status") == "unresolved_open")).height
+        if payout_state_df.height
+        else 0
+    )
+    unresolved_negative_count = (
+        negative_review_df.filter(pl.col("status") == "unresolved_block").height if negative_review_df.height else 0
+    )
+    broker_cash_filing_event_ids: list[str] = []
+    if payout_state_df.height:
+        broker_cash_filing_event_ids = (
+            payout_state_df.filter(pl.col("resolution_mode") == "broker_cash_outside_oekb_period")
+            .select(pl.col("payout_key").cast(pl.String))
+            .to_series()
+            .to_list()
+        )
+
+    filing_event_types = {
+        "oekb_reported_distribution_10286",
+        "oekb_deemed_distribution_10287",
+        "oekb_non_reported_distribution_10595",
+    }
+    filing_income_df = income_events_df.filter(
+        pl.col("event_type").is_in(filing_event_types)
+        | (
+            (pl.col("event_type") == "broker_dividend_event")
+            & pl.col("matched_broker_event_id").cast(pl.String).is_in(broker_cash_filing_event_ids)
+        )
+    )
+    filing_distribution_total_eur = filing_income_df["amount_total_eur"].sum() if filing_income_df.height else 0.0
+    filing_creditable_foreign_tax_total_eur = (
+        income_events_df.filter(pl.col("event_type") == "oekb_creditable_foreign_tax_10288")[
+            "creditable_foreign_tax_total_eur"
+        ].sum()
+        if income_events_df.height
+        else 0.0
+    )
+
+    income_lines = [
+        (
+            f"- `{row['event_type']}` `{row['ticker']}` @ `{row['event_date']}`: "
+            f"amount `{row['amount_total_eur']:.6f} EUR`, "
+            f"creditable foreign tax `{row['creditable_foreign_tax_total_eur']:.6f} EUR`"
+        )
+        for row in income_events_df.to_dicts()
+        if row["event_type"] != "broker_dividend_event"
+    ] or ["- no ETF tax income events were emitted"]
+
+    filing_lines = [
+        (
+            f"- `ETF distributions 27.5%`: `{filing_distribution_total_eur:.6f} EUR`"
+        ),
+        (
+            f"- `Creditable foreign tax`: `{filing_creditable_foreign_tax_total_eur:.6f} EUR`"
+        ),
+        (
+            "- includes `10286`, `10287`, `10595`, and only those broker cash payouts that remain the tax event "
+            "because no OeKB report period covered the pay date"
+        ),
+        (
+            "- excludes matched broker payout rows when OeKB distribution classification replaced them"
+        ),
+        (
+            "- basis corrections from `10289` are not entered separately in E1kv; they only adjust future sale basis"
+        ),
+    ]
+
+    basis_lines = [
+        (
+            f"- `{row['ticker']}` `{row['report_type']}` @ `{row['effective_date']}`: "
+            f"shares `{row['shares_held_on_eligibility_date']}`, "
+            f"basis delta `{row['basis_stepup_total_eur']:.6f} EUR`"
+        )
+        for row in basis_adjustments_df.to_dicts()
+    ] or ["- no ETF basis corrections were applied"]
+
+    open_lot_lines = []
+    if ledger_df.height:
+        open_lots_df = ledger_df.filter(pl.col("remaining_quantity") > 0)
+        for row in (
+            open_lots_df.group_by("ticker")
+            .agg(
+                pl.len().alias("lot_count"),
+                pl.sum("remaining_quantity").alias("remaining_quantity"),
+                pl.sum("original_cost_eur").alias("original_cost_eur"),
+                pl.sum("cumulative_oekb_stepup_eur").alias("cumulative_oekb_stepup_eur"),
+                pl.sum("adjusted_basis_eur").alias("adjusted_basis_eur"),
+            )
+            .sort("ticker")
+            .to_dicts()
+        ):
+            open_lot_lines.append(
+                f"- `{row['ticker']}`: open lots `{row['lot_count']}`, open quantity `{row['remaining_quantity']}`, "
+                f"original basis `{row['original_cost_eur']:.6f} EUR`, "
+                f"OeKB basis adjustment `{row['cumulative_oekb_stepup_eur']:.6f} EUR`, "
+                f"adjusted basis `{row['adjusted_basis_eur']:.6f} EUR`"
+            )
+    if not open_lot_lines:
+        open_lot_lines = ["- no open reporting-fund lots remain"]
+
+    next_period_lines = [
+        (
+            f"- opening lot ledger for `{tax_year + 1}`: "
+            f"`{next_period_ledger_path.as_posix()}`"
+        ),
+        (
+            f"- payout resolution carryforward state for `{tax_year + 1}`: "
+            f"`{next_period_payout_state_path.as_posix()}`"
+        ),
+    ]
+    next_period_lines.append(
+        f"- combine those carryforward files with the next year's raw IBKR XML inputs, trade history, "
+        f"and OeKB reports when running the `{tax_year + 1}` workflow"
+    )
+
+    negative_override_lines = [
+        f"- manual override file path: `{next_period_negative_override_path.as_posix()}`"
+    ]
+    if unresolved_negative_count == 0:
+        negative_override_lines.append(
+            "- current run has no unresolved negative deemed-distribution review items, so no manual override is needed"
+        )
+    else:
+        negative_override_lines.append(
+            "- use this only if the workflow marks a negative `10287` case as unresolved and requests a manual decision"
+        )
+
+    summary_path.write_text(
+        "\n".join(
+            [
+                "# Reporting Funds Summary",
+                "",
+                f"## {tax_year} Filing Inputs",
+                *filing_lines,
+                "",
+                f"## {tax_year} ETF Income Events",
+                *income_lines,
+                f"- `diagnostic_total_income_eur`: `{income_total_eur:.6f} EUR`",
+                f"- `diagnostic_total_creditable_foreign_tax_eur`: `{foreign_tax_total_eur:.6f} EUR`",
+                "- diagnostic totals are workflow totals, not direct filing fields",
+                "",
+                "## Basis Adjustments",
+                *basis_lines,
+                f"- `total_basis_adjustment_eur`: `{basis_total_eur:.6f} EUR`",
+                "",
+                "## Ledger State",
+                *open_lot_lines,
+                "",
+                "## Sales",
+                f"- `taxable_gain_loss_total_eur`: `{sales_total_eur:.6f} EUR`",
+                "",
+                "## Next Reporting Period Inputs",
+                *next_period_lines,
+                "",
+                "## Manual Override Fallback",
+                *negative_override_lines,
+                "",
+                "## Notes",
+                "- OeKB remains the ETF tax source of truth.",
+                "- Broker dividend accrual rows are cross-checked against ETF cash transactions using actionID first.",
+                f"- unresolved payout rows blocking this year: `{unresolved_count}`",
+                f"- unresolved negative deemed-distribution review rows blocking this year: `{unresolved_negative_count}`",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _determine_required_isins(
+    tax_year: int,
+    previous_lots: list[Lot],
+    all_trades: list[IbkrTrade],
+    has_previous_ledger: bool,
+) -> set[str]:
+    current_year_trades = {trade.isin for trade in all_trades if trade.trade_date.year == tax_year}
+    if has_previous_ledger:
+        previous_open_isins = {lot.isin for lot in previous_lots if lot.remaining_quantity > 0}
+        return current_year_trades | previous_open_isins
+
+    quantity_by_isin: dict[str, float] = defaultdict(float)
+    for trade in all_trades:
+        if trade.trade_date.year > tax_year:
+            continue
+        sign = 1 if trade.operation == "buy" else -1
+        quantity_by_isin[trade.isin] += sign * trade.quantity
+
+    year_end_open_isins = {isin for isin, quantity in quantity_by_isin.items() if quantity > 0}
+    return current_year_trades | year_end_open_isins
+
+
+def _resolve_fx_bounds(
+    tax_year: int,
+    opening_trades: list[IbkrTrade],
+    current_year_trades: list[IbkrTrade],
+    reports: list[OekbReport],
+    broker_events: list[BrokerDividendEvent],
+    has_previous_ledger: bool,
+) -> tuple[date, date]:
+    relevant_dates: list[date] = []
+    relevant_dates.extend(trade.trade_date for trade in current_year_trades)
+    relevant_dates.extend(report.meldedatum for report in reports)
+    relevant_dates.extend(report.eligibility_date for report in reports)
+    relevant_dates.extend((report.payout_date or report.meldedatum) for report in reports)
+    relevant_dates.extend(event.pay_date for event in broker_events)
+    relevant_dates.extend(event.ex_date for event in broker_events if event.ex_date is not None)
+    if not has_previous_ledger:
+        relevant_dates.extend(trade.trade_date for trade in opening_trades)
+
+    if not relevant_dates:
+        return date(tax_year, 1, 1), date(tax_year, 12, 31)
+
+    return min(relevant_dates), max(relevant_dates)
+
+
+def _resolve_required_currencies(
+    opening_trades: list[IbkrTrade],
+    current_year_trades: list[IbkrTrade],
+    reports: list[OekbReport],
+    broker_events: list[BrokerDividendEvent],
+) -> tuple[str, ...]:
+    currencies = {trade.currency for trade in opening_trades}
+    currencies.update(trade.currency for trade in current_year_trades)
+    currencies.update(report.currency for report in reports)
+    currencies.update(event.currency for event in broker_events)
+    currencies.discard("EUR")
+    return tuple(sorted(currencies or {"USD"}))
+
+
+def _negative_report_key(report: OekbReport) -> str:
+    return f"{report.isin}:{report.meldedatum.isoformat()}"
+
+
+def _load_negative_deemed_distribution_overrides(path: str | Path) -> dict[str, dict[str, str]]:
+    override_path = Path(path)
+    if not override_path.exists():
+        return {}
+
+    overrides_df = pl.read_csv(override_path)
+    overrides: dict[str, dict[str, str]] = {}
+    for row in overrides_df.to_dicts():
+        report_key = str(row.get("report_key") or "").strip()
+        if not report_key:
+            continue
+        overrides[report_key] = {
+            "decision": str(row.get("decision") or "").strip(),
+            "eligible_quantity": str(row.get("eligible_quantity") or "").strip(),
+            "notes": str(row.get("notes") or "").strip(),
+        }
+    return overrides
+
+
+def _is_frozen_historical_negative_report(report: OekbReport, historical_lock_start_date: date) -> bool:
+    period = report.annual_reconciliation_period
+    if period is None:
+        return False
+    _, period_end = period
+    return period_end < historical_lock_start_date
+
+
+def _candidate_negative_report_payouts(report: OekbReport, broker_events: list[BrokerDividendEvent]) -> list[BrokerDividendEvent]:
+    same_isin_events = [event for event in broker_events if event.isin == report.isin and event.pay_date < report.meldedatum]
+    period = report.annual_reconciliation_period
+    if period is None:
+        return same_isin_events
+    period_start, period_end = period
+    return [event for event in same_isin_events if period_start <= event.pay_date <= period_end]
+
+
+def _parse_override_quantity(raw_value: str, report_key: str) -> float | None:
+    if not raw_value:
+        return None
+    try:
+        return round_qty(float(raw_value))
+    except ValueError as exc:
+        raise ValueError(f"Invalid eligible_quantity override for negative deemed-distribution report {report_key}.") from exc
+
+
+def _resolve_negative_deemed_distribution_review(
+    report: OekbReport,
+    lots: list[Lot],
+    broker_events: list[BrokerDividendEvent],
+    overrides: dict[str, dict[str, str]],
+    historical_lock_start_date: date,
+) -> dict[str, object]:
+    report_key = _negative_report_key(report)
+    eligible_lots = _eligible_lots(lots, report.isin, report.meldedatum)
+    _ensure_lot_compatibility(eligible_lots, report)
+    quantity_held_on_report_date = _sum_shares(eligible_lots)
+    candidate_payouts = _candidate_negative_report_payouts(report, broker_events)
+
+    decision = NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
+    status = NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
+    eligible_quantity_used = 0.0
+    notes = ""
+
+    if _is_frozen_historical_negative_report(report, historical_lock_start_date):
+        decision = NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL
+        status = NEGATIVE_DEEMED_DISTRIBUTION_APPLIED_HISTORICAL
+        eligible_quantity_used = quantity_held_on_report_date
+        notes = (
+            "Historical pre-lock annual report applied as annual cleanup. "
+            "The original cash payout stays in the prior year; deemed distributed income, "
+            "creditable foreign tax, and basis correction are applied on the report date."
+        )
+    else:
+        override = overrides.get(report_key)
+        if override is not None:
+            decision = override.get("decision") or NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
+            notes = override.get("notes") or ""
+            override_quantity = _parse_override_quantity(override.get("eligible_quantity", ""), report_key)
+            if decision == NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL:
+                eligible_quantity_used = quantity_held_on_report_date if override_quantity is None else override_quantity
+                status = "applied_full"
+            elif decision == NEGATIVE_DEEMED_DISTRIBUTION_APPLY_PARTIAL:
+                if override_quantity is None:
+                    raise ValueError(
+                        f"Negative deemed-distribution override for {report_key} uses apply_partial but no eligible_quantity was provided."
+                    )
+                eligible_quantity_used = override_quantity
+                status = "applied_partial"
+            elif decision == NEGATIVE_DEEMED_DISTRIBUTION_IGNORE:
+                status = NEGATIVE_DEEMED_DISTRIBUTION_IGNORE
+            else:
+                decision = NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
+                status = NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
+
+            if eligible_quantity_used < 0 or eligible_quantity_used - quantity_held_on_report_date > 1e-8:
+                raise ValueError(
+                    f"Negative deemed-distribution override for {report_key} uses eligible_quantity={eligible_quantity_used}, "
+                    f"which exceeds the quantity held on the report date ({quantity_held_on_report_date})."
+                )
+
+    return {
+        "report_key": report_key,
+        "ticker": report.ticker,
+        "isin": report.isin,
+        "report_date": report.meldedatum.isoformat(),
+        "decision": decision,
+        "status": status,
+        "eligible_quantity_used": round_qty(eligible_quantity_used),
+        "quantity_held_on_report_date": round_qty(quantity_held_on_report_date),
+        "candidate_payout_count": len(candidate_payouts),
+        "candidate_payout_dates": "|".join(event.pay_date.isoformat() for event in candidate_payouts),
+        "candidate_payout_quantities": "|".join(str(round_qty(event.quantity)) for event in candidate_payouts),
+        "candidate_payout_gross_amounts_ccy": "|".join(str(round_money(event.gross_amount or 0.0)) for event in candidate_payouts),
+        "deemed_distributed_income_per_share_ccy": round_money(report.age_per_share_ccy),
+        "non_reported_distribution_per_share_ccy": round_money(report.non_reported_distribution_per_share_ccy),
+        "creditable_foreign_tax_per_share_ccy": round_money(report.creditable_foreign_tax_per_share_ccy),
+        "basis_correction_per_share_ccy": round_money(report.acquisition_cost_correction_per_share_ccy),
+        "basis_age_component_per_share_ccy": round_money(report.basis_age_component_per_share_ccy or 0.0),
+        "basis_distribution_component_per_share_ccy": round_money(report.basis_distribution_component_per_share_ccy or 0.0),
+        "capital_repayment_per_share_ccy": round_money(report.capital_repayment_per_share_ccy or 0.0),
+        "withheld_tax_on_non_reported_distributions_per_share_ccy": round_money(
+            report.withheld_tax_on_non_reported_distributions_per_share_ccy or 0.0
+        ),
+        "source_file": report.source_file,
+        "notes": notes,
+    }
+
+
+def _build_ticker_by_isin(previous_lots: list[Lot], all_trades: list[IbkrTrade], broker_events: list[BrokerDividendEvent]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for lot in previous_lots:
+        mapping.setdefault(lot.isin, lot.ticker)
+    for trade in all_trades:
+        mapping.setdefault(trade.isin, trade.ticker)
+    for event in broker_events:
+        mapping.setdefault(event.isin, event.ticker)
+    return mapping
+
+
+def run_workflow(
+    *,
+    person: str,
+    tax_year: int,
+    ibkr_tax_xml_path: str | Path,
+    ibkr_trade_history_path: str | Path,
+    raw_exchange_rates_path: str | Path = "data/input/currencies/raw_exchange_rates.csv",
+    oekb_root_dir: str | Path | None = None,
+    state_dir: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    resolution_cutoff_date: str | date | None = None,
+    strict_unresolved_payouts: bool = True,
+    historical_lock_start_date: date = date(2025, 1, 1),
+    negative_deemed_income_overrides_path: str | Path | None = None,
+) -> dict[str, Path]:
+    reporting_funds_root = Path(f"data/output/{person}/reporting_funds")
+    output_dir_path = Path(output_dir or reporting_funds_root / str(tax_year))
+    state_dir_path = Path(state_dir or reporting_funds_root)
+    oekb_root_dir_path = Path(oekb_root_dir or "data/input/oekb")
+    oekb_dir_path = oekb_root_dir_path / str(tax_year)
+    previous_ledger_path = state_dir_path / f"fund_tax_ledger_{tax_year - 1}_final.csv"
+    current_ledger_path = state_dir_path / f"fund_tax_ledger_{tax_year}_final.csv"
+    payout_state_path = state_dir_path / "fund_tax_payout_state.csv"
+    negative_review_override_path = Path(
+        negative_deemed_income_overrides_path or state_dir_path / "fund_tax_negative_deemed_distribution_overrides.csv"
+    )
+    has_previous_ledger = previous_ledger_path.exists()
+    if resolution_cutoff_date is None:
+        resolution_cutoff = date(tax_year + 1, 12, 31)
+    elif isinstance(resolution_cutoff_date, date):
+        resolution_cutoff = resolution_cutoff_date
+    else:
+        resolution_cutoff = datetime.strptime(str(resolution_cutoff_date), "%Y-%m-%d").date()
+
+    tax_xml_path = str(ibkr_tax_xml_path)
+    trade_history_path = str(ibkr_trade_history_path)
+
+    previous_lots = load_ledger(previous_ledger_path) if has_previous_ledger else []
+    previous_payout_state = load_payout_state(payout_state_path)
+    negative_deemed_overrides = _load_negative_deemed_distribution_overrides(negative_review_override_path)
+    accrual_rows = load_ibkr_etf_dividend_accrual_rows(tax_xml_path)
+    cash_rows = load_ibkr_etf_cash_dividend_rows(tax_xml_path)
+    all_broker_events = build_broker_dividend_events(accrual_rows, cash_rows)
+    all_trades = load_ibkr_etf_trades(trade_history_path, require_raw_trades=not has_previous_ledger)
+    ticker_by_isin = _build_ticker_by_isin(previous_lots, all_trades, all_broker_events)
+    required_isins = _determine_required_isins(
+        tax_year=tax_year,
+        previous_lots=previous_lots,
+        all_trades=all_trades,
+        has_previous_ledger=has_previous_ledger,
+    )
+    same_year_reports = (
+        load_required_oekb_reports(oekb_dir_path, tax_year, required_isins, ticker_by_isin=ticker_by_isin)
+        if required_isins
+        else []
+    )
+    lookahead_reports = []
+    lookahead_dir = oekb_root_dir_path / str(tax_year + 1)
+    if required_isins:
+        lookahead_reports = [
+            report
+            for report in load_matching_oekb_reports(
+                lookahead_dir,
+                required_isins,
+                tax_year=tax_year + 1,
+                ticker_by_isin=ticker_by_isin,
+            )
+            if report.is_jahresmeldung and report.meldedatum <= resolution_cutoff
+        ]
+
+    year_start = date(tax_year, 1, 1)
+    year_end = date(tax_year, 12, 31)
+    opening_trades = [trade for trade in all_trades if trade.trade_date < year_start]
+    current_year_trades = [trade for trade in all_trades if year_start <= trade.trade_date <= year_end]
+    current_year_broker_events = [event for event in all_broker_events if event.pay_date.year == tax_year]
+    fx_start_date, fx_end_date = _resolve_fx_bounds(
+        tax_year=tax_year,
+        opening_trades=opening_trades,
+        current_year_trades=current_year_trades,
+        reports=same_year_reports + lookahead_reports,
+        broker_events=current_year_broker_events,
+        has_previous_ledger=has_previous_ledger,
+    )
+    currencies = _resolve_required_currencies(opening_trades, current_year_trades, same_year_reports + lookahead_reports, current_year_broker_events)
+    fx_table = build_fx_table(
+        start_date=fx_start_date,
+        end_date=fx_end_date,
+        raw_exchange_rates_path=raw_exchange_rates_path,
+        currencies=currencies,
+    )
+
+    working_lots = prepare_lots_for_new_year(previous_lots) if has_previous_ledger else []
+    if not has_previous_ledger:
+        for trade in opening_trades:
+            apply_trade(working_lots, trade, fx_table=fx_table, sale_rows=None, track_ytd=False)
+
+    payout_state = previous_payout_state
+    for event in all_broker_events:
+        _upsert_payout_state_row(
+            payout_state,
+            event,
+            historical_lock_start_date=historical_lock_start_date,
+        )
+
+    payout_resolution_rows: list[dict[str, object]] = []
+    payout_resolution_rows.extend(
+        _match_distribution_report_to_payouts(
+            list(payout_state.values()),
+            same_year_reports,
+            historical_lock_start_date=historical_lock_start_date,
+            tax_year=tax_year,
+        )
+    )
+
+    sale_rows: list[dict[str, object]] = []
+    basis_adjustment_rows: list[dict[str, object]] = []
+    income_rows: list[dict[str, object]] = [_build_broker_dividend_row(event, fx_table) for event in current_year_broker_events]
+    negative_review_rows: list[dict[str, object]] = []
+    events: list[tuple[date, int, int, object]] = []
+    events.extend((trade.trade_date, 1, index, trade) for index, trade in enumerate(current_year_trades))
+    events.extend((report.eligibility_date, 0, index, report) for index, report in enumerate(same_year_reports))
+    events.sort(key=lambda item: (item[0], item[1], item[2]))
+    skipped_negative_report_keys: set[str] = set()
+
+    for _, _, _, payload in events:
+        if isinstance(payload, OekbReport):
+            if payload.age_per_share_ccy < 0.0:
+                review_row = _resolve_negative_deemed_distribution_review(
+                    payload,
+                    working_lots,
+                    all_broker_events,
+                    negative_deemed_overrides,
+                    historical_lock_start_date,
+                )
+                negative_review_rows.append(review_row)
+                report_key = str(review_row["report_key"])
+                decision = str(review_row["decision"])
+                eligible_quantity_used = float(review_row["eligible_quantity_used"])
+
+                if decision == NEGATIVE_DEEMED_DISTRIBUTION_IGNORE:
+                    skipped_negative_report_keys.add(report_key)
+                    continue
+                if decision == NEGATIVE_DEEMED_DISTRIBUTION_BLOCK:
+                    skipped_negative_report_keys.add(report_key)
+                    continue
+
+                if str(review_row["status"]) == NEGATIVE_DEEMED_DISTRIBUTION_APPLIED_HISTORICAL:
+                    note_prefix = "historical annual cleanup applied automatically; "
+                else:
+                    note_prefix = (
+                        "manual negative deemed-distribution override apply_full; "
+                        if decision == NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL
+                        else "manual negative deemed-distribution override apply_partial; "
+                    )
+                income_rows.extend(
+                    build_income_rows_for_report(
+                        working_lots,
+                        payload,
+                        tax_year=tax_year,
+                        fx_table=fx_table,
+                        broker_events=current_year_broker_events,
+                        quantity_override=eligible_quantity_used,
+                        note_prefix=note_prefix,
+                    )
+                )
+                basis_adjustment_rows.append(
+                    apply_basis_correction(
+                        working_lots,
+                        payload,
+                        tax_year=tax_year,
+                        fx_table=fx_table,
+                        quantity_override=eligible_quantity_used,
+                        note_prefix=note_prefix,
+                    )
+                )
+                continue
+            income_rows.extend(
+                build_income_rows_for_report(
+                    working_lots,
+                    payload,
+                    tax_year=tax_year,
+                    fx_table=fx_table,
+                    broker_events=current_year_broker_events,
+                )
+            )
+            basis_adjustment_rows.append(apply_basis_correction(working_lots, payload, tax_year=tax_year, fx_table=fx_table))
+        else:
+            apply_trade(working_lots, payload, fx_table=fx_table, sale_rows=sale_rows, track_ytd=True)
+
+    annual_reports_for_resolution = [
+        report
+        for report in same_year_reports + lookahead_reports
+        if report.is_jahresmeldung and _negative_report_key(report) not in skipped_negative_report_keys
+    ]
+    non_reported_income_rows, annual_resolution_rows = _resolve_annual_10595_reports(
+        list(payout_state.values()),
+        annual_reports_for_resolution,
+        target_tax_year=tax_year,
+        historical_lock_start_date=historical_lock_start_date,
+        lots_for_quantity=working_lots,
+        fx_table=fx_table,
+    )
+    income_rows.extend(non_reported_income_rows)
+    payout_resolution_rows.extend(annual_resolution_rows)
+    payout_resolution_rows.extend(
+        _resolve_broker_cash_payouts_outside_annual_periods(
+            list(payout_state.values()),
+            annual_reports_for_resolution,
+            tax_year=tax_year,
+            historical_lock_start_date=historical_lock_start_date,
+        )
+    )
+
+    payout_state_rows = list(payout_state.values())
+    unresolved_current_year_rows = [
+        payout
+        for payout in payout_state_rows
+        if payout.pay_date.year == tax_year
+        and payout.pay_date >= historical_lock_start_date
+        and payout.status == "unresolved_open"
+    ]
+
+    ledger_df = lots_to_df(working_lots)
+    income_events_df = income_events_to_df(income_rows)
+    basis_adjustments_df = basis_adjustments_to_df(basis_adjustment_rows)
+    sales_df = sales_to_df(sale_rows)
+    payout_state_df = payout_state_to_df(payout_state_rows)
+    payout_resolution_df = payout_resolution_events_to_df(payout_resolution_rows)
+    negative_review_df = negative_deemed_distribution_review_to_df(negative_review_rows)
+
+    write_csv(ledger_df, current_ledger_path)
+    income_events_path = output_dir_path / f"fund_tax_income_events_{tax_year}.csv"
+    basis_adjustments_path = output_dir_path / f"fund_tax_basis_adjustments_{tax_year}.csv"
+    sales_path = output_dir_path / f"fund_tax_sales_{tax_year}.csv"
+    payout_state_output_path = state_dir_path / "fund_tax_payout_state.csv"
+    payout_resolution_path = output_dir_path / f"fund_tax_payout_resolution_events_{tax_year}.csv"
+    negative_review_path = output_dir_path / f"fund_tax_negative_deemed_distribution_review_{tax_year}.csv"
+    summary_path = output_dir_path / f"reporting_funds_{tax_year}_summary.md"
+    write_csv(income_events_df, income_events_path)
+    write_csv(basis_adjustments_df, basis_adjustments_path)
+    write_csv(sales_df, sales_path)
+    write_csv(payout_state_df, payout_state_output_path)
+    write_csv(payout_resolution_df, payout_resolution_path)
+    write_csv(negative_review_df, negative_review_path)
+    write_summary(
+        summary_path,
+        tax_year=tax_year,
+        next_period_ledger_path=current_ledger_path,
+        next_period_payout_state_path=payout_state_output_path,
+        next_period_negative_override_path=negative_review_override_path,
+        ledger_df=ledger_df,
+        income_events_df=income_events_df,
+        basis_adjustments_df=basis_adjustments_df,
+        sales_df=sales_df,
+        payout_state_df=payout_state_df,
+        negative_review_df=negative_review_df,
+    )
+
+    unresolved_negative_rows = [row for row in negative_review_rows if row["status"] == NEGATIVE_DEEMED_DISTRIBUTION_BLOCK]
+    if unresolved_negative_rows:
+        unresolved_text = "; ".join(
+            (
+                f"{row['ticker']} ({row['isin']}) report_date={row['report_date']} "
+                f"deemed_distributed_income_per_share={row['deemed_distributed_income_per_share_ccy']}"
+            )
+            for row in unresolved_negative_rows
+        )
+        raise ValueError(
+            "Negative deemed distributed income requires manual review. "
+            f"Review file: {negative_review_path}. Unresolved reports: {unresolved_text}"
+        )
+
+    if strict_unresolved_payouts and unresolved_current_year_rows:
+        unresolved_text = "; ".join(
+            (
+                f"{row.ticker} ({row.isin}) pay_date={row.pay_date.isoformat()} ex_date="
+                f"{row.ex_date.isoformat() if row.ex_date else '-'} gross={row.broker_gross_amount_ccy}"
+            )
+            for row in unresolved_current_year_rows
+        )
+        raise ValueError(
+            "Unresolved ETF broker payouts remain after same-year and lookahead OeKB resolution: "
+            f"{unresolved_text}"
+        )
+
+    return {
+        "ledger": current_ledger_path,
+        "income_events": income_events_path,
+        "basis_adjustments": basis_adjustments_path,
+        "oekb_adjustments": basis_adjustments_path,
+        "sales": sales_path,
+        "payout_state": payout_state_output_path,
+        "payout_resolution_events": payout_resolution_path,
+        "negative_deemed_distribution_review": negative_review_path,
+        "summary": summary_path,
+    }

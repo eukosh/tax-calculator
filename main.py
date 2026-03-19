@@ -34,7 +34,7 @@ logging.basicConfig(
 
 # person = "oryna"
 person = "eugene"
-ibkr_input_path = "data/input/eugene/2025/ibkr_20250101_20251231.xml"
+ibkr_input_path = "data/input/eugene/2025/ibkr_20250101_20260101.xml"
 freedom_input_path = (
     "data/input/oryna/freedom/ff_oryna_2024-12-31 23_59_59_2025-07-06 23_59_59_all.json"
     if person == "oryna"
@@ -89,13 +89,14 @@ if __name__ == "__main__":
         start_date=reporting_start_date,
         end_date=reporting_end_date,
         separate_trade_profit_loss=ibkr_calculate_trade_profit_loss_separately,
+        excluded_trade_subcategories={"ETF"},
     )
-    dividends_country_agg_df, etf_divs_agg_df = process_cash_transactions_ibkr(
+    dividends_country_agg_df, _ = process_cash_transactions_ibkr(
         xml_file_path=ibkr_input_path,
         exchange_rates_df=rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
-        extract_etf=True,
+        excluded_cash_transaction_subcategories={"ETF"},
     )
 
     bonds_tax_df, bonds_tax_country_agg_df = process_bonds_ibkr(
@@ -121,7 +122,6 @@ if __name__ == "__main__":
         for name, df in [
             ("dividends", dividends_country_agg_df),
             ("bonds", bonds_tax_country_agg_df),
-            ("etf_dividends", etf_divs_agg_df),
             ("trades", trades_summary_df),
         ]
         if has_rows(df)
@@ -197,6 +197,7 @@ if __name__ == "__main__":
         exchange_rates_df=rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
+        excluded_cash_transaction_subcategories={"ETF"},
     )
     ibkr_bond_buckets_df = build_finanzonline_buckets_from_summary_df("ibkr_bonds", bonds_tax_country_agg_df)
     ibkr_trade_buckets_df = build_finanzonline_buckets_from_summary_df("ibkr_trades", trades_summary_df)

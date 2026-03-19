@@ -8,6 +8,7 @@ from src.const import Column
 from src.providers.ibkr import (
     IbkrSummarySection,
     apply_pivot,
+    build_finanzonline_dividend_buckets_ibkr,
     calculate_summary_ibkr,
     handle_dividend_adjustments,
     process_bonds_ibkr,
@@ -240,30 +241,22 @@ def test_apply_pivot_with_duplicates(sample_df_with_duplicates, caplog):
     assert_frame_equal(res_df, expected_df)
 
 
-@pytest.mark.parametrize(
-    "extract_etf",
-    [True, False],
-)
+@pytest.mark.parametrize("exclude_etf", [True, False])
 def test_process_cash_transactions_ibkr(
     rates_df,
     dividends_country_summary_df,
-    extract_etf,
+    exclude_etf,
     dividends_country_summary_no_etf_df,
-    dividends_etf_summary_df,
 ):
     res_df, etf_df = process_cash_transactions_ibkr(
         "tests/test_data/ibkr/For_tax_automation*",
         rates_df,
         start_date=REPORTING_START_DATE,
         end_date=REPORTING_END_DATE,
-        extract_etf=extract_etf,
+        excluded_cash_transaction_subcategories={"ETF"} if exclude_etf else None,
     )
-
-    if extract_etf:
-        assert_frame_equal(etf_df, dividends_etf_summary_df)
-    else:
-        assert etf_df is None
-    expected = dividends_country_summary_no_etf_df if extract_etf else dividends_country_summary_df
+    assert etf_df is None
+    expected = dividends_country_summary_no_etf_df if exclude_etf else dividends_country_summary_df
 
     assert_frame_equal(res_df, expected)
 
@@ -367,6 +360,7 @@ def test_process_trades_ibkr_uses_buy_and_sell_rates(tmp_path):
             Column.currency: ["USD"],
             Column.buy_date: [date(2024, 1, 2)],
             Column.trade_date: [date(2024, 6, 3)],
+            "sub_category": [""],
             "buy_exchange_rate": [1.0],
             "sell_exchange_rate": [1.2],
             "cost": [100.0],
@@ -417,6 +411,7 @@ def test_process_trades_ibkr_clips_taxable_profit_on_loss(tmp_path):
             Column.currency: ["USD"],
             Column.buy_date: [date(2024, 1, 2)],
             Column.trade_date: [date(2024, 6, 3)],
+            "sub_category": [""],
             "buy_exchange_rate": [1.0],
             "sell_exchange_rate": [1.0],
             "cost": [100.0],
@@ -568,6 +563,77 @@ def test_process_trades_ibkr_can_disable_separate_profit_loss_reporting(tmp_path
     )
 
     assert_frame_equal(summary_df, expected_summary_df)
+
+
+def test_core_ibkr_excludes_etfs_from_trades_cash_and_finanzonline_buckets(tmp_path):
+    xml_content = """\
+<FlexQueryResponse>
+  <FlexStatements count="1">
+    <FlexStatement>
+      <Trades>
+        <Lot symbol="SPY5" currency="USD" subCategory="ETF" openDateTime="2024-01-02 10:00:00" tradeDate="2024-06-03" cost="100" fifoPnlRealized="20" />
+        <Lot symbol="AAPL" currency="USD" subCategory="COMMON" openDateTime="2024-01-02 10:00:00" tradeDate="2024-06-03" cost="200" fifoPnlRealized="30" />
+      </Trades>
+      <CashTransactions>
+        <CashTransaction
+          accountId="-"
+          currency="USD"
+          assetCategory="STK"
+          subCategory="ETF"
+          symbol="SPY5"
+          issuerCountryCode="IE"
+          dateTime="2024-10-01 20:20:00"
+          settleDate="2024-10-01"
+          amount="4.5"
+          type="Dividends"
+          actionID="1"
+        />
+      </CashTransactions>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    xml_path = tmp_path / "ibkr_mixed.xml"
+    xml_path.write_text(xml_content)
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 1, 2), date(2024, 6, 3), date(2024, 10, 1)],
+            Column.currency: ["USD", "USD", "USD"],
+            Column.exchange_rate: [1.0, 1.0, 1.0],
+        }
+    )
+
+    detail_df, summary_df = process_trades_ibkr(
+        xml_file_path=str(xml_path),
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        excluded_trade_subcategories={"ETF"},
+    )
+    dividends_df, etf_dividends_df = process_cash_transactions_ibkr(
+        xml_file_path=str(xml_path),
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        excluded_cash_transaction_subcategories={"ETF"},
+    )
+    dividend_buckets_df = build_finanzonline_dividend_buckets_ibkr(
+        xml_file_path=str(xml_path),
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        excluded_cash_transaction_subcategories={"ETF"},
+    )
+
+    assert detail_df is not None
+    assert detail_df["symbol"].to_list() == ["AAPL"]
+    assert detail_df["sub_category"].to_list() == ["COMMON"]
+    assert summary_df is not None
+    assert summary_df["profit_euro_total"].to_list() == [30.0]
+    assert dividends_df is None
+    assert etf_dividends_df is None
+    assert dividend_buckets_df.is_empty()
 
 
 def test_calculate_summary_ibkr_rejects_duplicate_sections(dividends_country_summary_df):
