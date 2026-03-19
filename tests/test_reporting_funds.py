@@ -49,6 +49,8 @@ def _write_oekb_file(
     value_10595: str = "0,0000",
     value_10288: str = "0,0000",
     value_10289: str = "0,0000",
+    value_10047: str = "",
+    value_10055: str = "",
     currency: str = "USD",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +82,16 @@ def _write_oekb_file(
                 f"Nicht gemeldete Ausschüttungen;{value_10595};{value_10595};x;10595",
                 f"Anzurechnende ausländische Quellensteuer;{value_10288};{value_10288};x;10288",
                 f"Die Anschaffungskosten des Fondsanteils sind zu korrigieren um;{value_10289};{value_10289};x;10289",
+                *(
+                    [f"Gesamtausschüttungen;{value_10047};{value_10047};x;10047"]
+                    if value_10047
+                    else []
+                ),
+                *(
+                    [f"Basis Ausschüttungskomponente;{value_10055};{value_10055};x;10055"]
+                    if value_10055
+                    else []
+                ),
             ]
         )
         + "\n",
@@ -108,6 +120,48 @@ def _write_tax_xml(path: Path, *, cash_rows: list[str], accrual_rows: list[str])
         "</FlexStatement></FlexStatements></FlexQueryResponse>\n",
         encoding="utf-8",
     )
+
+
+def _write_opening_lots_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    header = (
+        "snapshot_date,asset_class,ticker,isin,lot_id,buy_date,original_quantity,remaining_quantity,"
+        "currency,buy_price_ccy,buy_fx_to_eur,original_cost_eur,cumulative_oekb_stepup_eur,adjusted_basis_eur,"
+        "status,broker,account_id,notes,last_adjustment_year,last_adjustment_reference,last_sale_date,"
+        "sold_quantity_ytd,source_trade_id,source_statement_file\n"
+    )
+    body = "".join(
+        ",".join(
+            [
+                str(row["snapshot_date"]),
+                str(row.get("asset_class", "ETF")),
+                str(row["ticker"]),
+                str(row["isin"]),
+                str(row["lot_id"]),
+                str(row["buy_date"]),
+                str(row["original_quantity"]),
+                str(row["remaining_quantity"]),
+                str(row["currency"]),
+                str(row["buy_price_ccy"]),
+                str(row["buy_fx_to_eur"]),
+                str(row["original_cost_eur"]),
+                str(row.get("cumulative_oekb_stepup_eur", 0.0)),
+                str(row.get("adjusted_basis_eur", row["original_cost_eur"])),
+                str(row.get("status", "open")),
+                str(row.get("broker", "ibkr")),
+                str(row.get("account_id", "U1")),
+                str(row.get("notes", "")),
+                str(row.get("last_adjustment_year", "")),
+                str(row.get("last_adjustment_reference", "")),
+                str(row.get("last_sale_date", "")),
+                str(row.get("sold_quantity_ytd", 0.0)),
+                str(row.get("source_trade_id", "")),
+                str(row.get("source_statement_file", "")),
+            ]
+        )
+        + "\n"
+        for row in rows
+    )
+    path.write_text(header + body, encoding="utf-8")
 
 
 def _trade_row(
@@ -397,7 +451,55 @@ def test_build_broker_dividend_events_matches_cash_by_action_id_and_ignores_symb
     assert len(events) == 1
     assert events[0].ticker == "IDTL"
     assert events[0].gross_amount == 40.43
+    assert events[0].evidence_state == "confirmed_cash"
     assert "symbol drift ignored" in events[0].matching_notes
+
+
+def test_build_broker_dividend_events_marks_po_only_and_re_without_cash_as_deferred_evidence(tmp_path: Path) -> None:
+    tax_xml = tmp_path / "tax.xml"
+    _write_tax_xml(
+        tax_xml,
+        cash_rows=[],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2025-12-18",
+                effective_date="2025-12-17",
+                ex_date="2025-12-18",
+                pay_date="2025-12-31",
+                quantity="14",
+                code="Po",
+                action_id="po-only",
+                gross_rate="0.299086",
+                gross_amount="4.19",
+            ),
+            _accrual_row(
+                ticker="SPY5",
+                isin="IE00B6YX5C33",
+                report_date="2025-12-31",
+                effective_date="2025-12-31",
+                ex_date="2025-12-22",
+                pay_date="2025-12-31",
+                quantity="8",
+                code="Re",
+                action_id="re-only",
+                gross_rate="1.6626",
+                gross_amount="-13.30",
+            ),
+        ],
+    )
+
+    events = build_broker_dividend_events(
+        load_ibkr_etf_dividend_accrual_rows(str(tax_xml)),
+        load_ibkr_etf_cash_dividend_rows(str(tax_xml)),
+        tax_year=2025,
+    )
+
+    assert [event.evidence_state for event in events] == [
+        "accrual_realized_cash_missing",
+        "accrual_pre_payout_only",
+    ]
 
 
 def test_build_broker_dividend_events_fails_on_cash_accrual_mismatch(tmp_path: Path) -> None:
@@ -629,8 +731,427 @@ def test_reporting_funds_workflow_historical_lock_bootstrap_ignores_pre_2025_ref
 
     payout_state_df = pl.read_csv(output_paths["payout_state"])
     historical_row = payout_state_df.filter(pl.col("payout_key") == "vusd-2024")
-    assert historical_row["status"].to_list() == ["ignored_pre_2025_reference"]
-    assert "ignored for tax and basis" in historical_row["notes"].to_list()[0]
+    assert historical_row["status"].to_list() == ["ignored_prior_year_reference"]
+    assert "ignored for current-year tax and basis" in historical_row["notes"].to_list()[0]
+
+
+def test_reporting_funds_carryforward_only_skips_pre_move_in_2024_activity(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2024-05-01", "USD", 1.0),
+            ("2024-06-01", "USD", 1.0),
+            ("2024-06-13", "USD", 1.0),
+            ("2024-06-26", "USD", 1.0),
+            ("2024-12-12", "USD", 1.0),
+            ("2024-12-27", "USD", 1.0),
+        ],
+    )
+    opening_lots_path = tmp_path / "opening.csv"
+    _write_opening_lots_csv(
+        opening_lots_path,
+        [
+            {
+                "snapshot_date": "2024-05-01",
+                "asset_class": "ETF",
+                "ticker": "VUSD",
+                "isin": "IE00B3XXRP09",
+                "lot_id": "open-1",
+                "buy_date": "2024-05-01",
+                "original_quantity": 10.0,
+                "remaining_quantity": 10.0,
+                "currency": "USD",
+                "buy_price_ccy": 100.0,
+                "buy_fx_to_eur": 1.0,
+                "original_cost_eur": 1000.0,
+                "adjusted_basis_eur": 1000.0,
+                "source_trade_id": "seed",
+                "source_statement_file": "seed.csv",
+            }
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                trade_date="2024-02-01",
+                date_time="2024-02-01 10:00:00",
+                operation="BUY",
+                quantity="2",
+                price="90",
+                transaction_id="pre-move-buy",
+            ),
+            _trade_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                trade_date="2024-06-01",
+                date_time="2024-06-01 10:00:00",
+                operation="BUY",
+                quantity="4",
+                price="110",
+                transaction_id="post-move-buy",
+            ),
+        ],
+    )
+    tax_xml_path = tmp_path / "tax.xml"
+    _write_tax_xml(
+        tax_xml_path,
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2024-03-27",
+                ex_date="2024-03-14",
+                amount="3.00",
+                action_id="pre-move-payout",
+                report_date="2024-03-28",
+            ),
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2024-06-26",
+                ex_date="2024-06-13",
+                amount="3.63",
+                action_id="post-move-payout",
+                report_date="2024-06-27",
+            ),
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-03-14",
+                effective_date="2024-03-13",
+                ex_date="2024-03-14",
+                pay_date="2024-03-27",
+                quantity="10",
+                code="Po",
+                action_id="pre-move-payout",
+                gross_rate="0.3000",
+                gross_amount="3.00",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-03-28",
+                effective_date="2024-03-27",
+                ex_date="2024-03-14",
+                pay_date="2024-03-27",
+                quantity="10",
+                code="Re",
+                action_id="pre-move-payout",
+                gross_rate="0.3000",
+                gross_amount="-3.00",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-06-13",
+                effective_date="2024-06-12",
+                ex_date="2024-06-13",
+                pay_date="2024-06-26",
+                quantity="14",
+                code="Po",
+                action_id="post-move-payout",
+                gross_rate="0.2593",
+                gross_amount="3.63",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-06-27",
+                effective_date="2024-06-26",
+                ex_date="2024-06-13",
+                pay_date="2024-06-26",
+                quantity="14",
+                code="Re",
+                action_id="post-move-payout",
+                gross_rate="0.2593",
+                gross_amount="-3.63",
+            ),
+        ],
+    )
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2024" / "march.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="25.03.2024",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="27.03.2024",
+        ex_tag="14.03.2024",
+        value_10286="0,3000",
+        value_10288="0,0100",
+        value_10289="-0,0500",
+    )
+    _write_oekb_file(
+        oekb_root / "2024" / "june.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="25.06.2024",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="26.06.2024",
+        ex_tag="13.06.2024",
+        value_10286="0,2593",
+        value_10288="0,0303",
+        value_10289="-0,0538",
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2024,
+        ibkr_tax_xml_path=tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+        opening_lots_path=opening_lots_path,
+        authoritative_start_date=date(2024, 5, 1),
+        carryforward_only=True,
+    )
+
+    ledger_df = pl.read_csv(output_paths["ledger"])
+    income_df = pl.read_csv(output_paths["income_events"])
+    basis_df = pl.read_csv(output_paths["basis_adjustments"])
+    payout_df = pl.read_csv(output_paths["payout_state"])
+
+    assert ledger_df["remaining_quantity"].sum() == 14.0
+    assert "pre-move-buy" not in ledger_df["source_trade_id"].to_list()
+    assert income_df.is_empty()
+    assert basis_df["effective_date"].to_list() == ["2024-06-26"]
+    assert payout_df["payout_key"].to_list() == ["post-move-payout"]
+
+
+def test_reporting_funds_carryforward_only_applies_basis_without_distribution_match(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2024-05-01", "USD", 1.0),
+            ("2024-06-13", "USD", 1.0),
+            ("2024-06-26", "USD", 1.0),
+        ],
+    )
+    opening_lots_path = tmp_path / "opening.csv"
+    _write_opening_lots_csv(
+        opening_lots_path,
+        [
+            {
+                "snapshot_date": "2024-05-01",
+                "asset_class": "ETF",
+                "ticker": "IDTL",
+                "isin": "IE00BSKRJZ44",
+                "lot_id": "open-1",
+                "buy_date": "2024-05-01",
+                "original_quantity": 10.0,
+                "remaining_quantity": 10.0,
+                "currency": "USD",
+                "buy_price_ccy": 3.5,
+                "buy_fx_to_eur": 1.0,
+                "original_cost_eur": 35.0,
+                "adjusted_basis_eur": 35.0,
+                "source_trade_id": "seed",
+                "source_statement_file": "seed.csv",
+            }
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(trade_history_path, [])
+    tax_xml_path = tmp_path / "tax.xml"
+    _write_tax_xml(tax_xml_path, cash_rows=[], accrual_rows=[])
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2024" / "idtl_june.csv",
+        isin="IE00BSKRJZ44",
+        meldedatum="25.06.2024",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="26.06.2024",
+        ex_tag="13.06.2024",
+        value_10286="0,0149",
+        value_10289="-0,0609",
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2024,
+        ibkr_tax_xml_path=tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+        opening_lots_path=opening_lots_path,
+        authoritative_start_date=date(2024, 5, 1),
+        carryforward_only=True,
+    )
+
+    income_df = pl.read_csv(output_paths["income_events"])
+    basis_df = pl.read_csv(output_paths["basis_adjustments"])
+    ledger_df = pl.read_csv(output_paths["ledger"])
+
+    assert income_df.is_empty()
+    assert basis_df.is_empty()
+    assert ledger_df["cumulative_oekb_stepup_eur"].to_list() == [0.0]
+
+
+def test_reporting_funds_2025_uses_2024_carryforward_ledger_once(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2024-05-01", "USD", 1.0),
+            ("2024-06-01", "USD", 1.0),
+            ("2024-06-13", "USD", 1.0),
+            ("2024-06-26", "USD", 1.0),
+            ("2025-01-15", "USD", 1.0),
+        ],
+    )
+    opening_lots_path = tmp_path / "opening.csv"
+    _write_opening_lots_csv(
+        opening_lots_path,
+        [
+            {
+                "snapshot_date": "2024-05-01",
+                "asset_class": "ETF",
+                "ticker": "VUSD",
+                "isin": "IE00B3XXRP09",
+                "lot_id": "open-1",
+                "buy_date": "2024-05-01",
+                "original_quantity": 10.0,
+                "remaining_quantity": 10.0,
+                "currency": "USD",
+                "buy_price_ccy": 100.0,
+                "buy_fx_to_eur": 1.0,
+                "original_cost_eur": 1000.0,
+                "adjusted_basis_eur": 1000.0,
+                "source_trade_id": "seed",
+                "source_statement_file": "seed.csv",
+            }
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                trade_date="2024-06-01",
+                date_time="2024-06-01 10:00:00",
+                operation="BUY",
+                quantity="4",
+                price="110",
+                transaction_id="post-move-buy",
+            )
+        ],
+    )
+    tax_dir = tmp_path / "tax"
+    tax_dir.mkdir()
+    _write_tax_xml(
+        tax_dir / "2024.xml",
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2024-06-26",
+                ex_date="2024-06-13",
+                amount="3.63",
+                action_id="post-move-payout",
+                report_date="2024-06-27",
+            )
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-06-13",
+                effective_date="2024-06-12",
+                ex_date="2024-06-13",
+                pay_date="2024-06-26",
+                quantity="14",
+                code="Po",
+                action_id="post-move-payout",
+                gross_rate="0.2593",
+                gross_amount="3.63",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-06-27",
+                effective_date="2024-06-26",
+                ex_date="2024-06-13",
+                pay_date="2024-06-26",
+                quantity="14",
+                code="Re",
+                action_id="post-move-payout",
+                gross_rate="0.2593",
+                gross_amount="-3.63",
+            ),
+        ],
+    )
+    _write_tax_xml(tax_dir / "2025.xml", cash_rows=[], accrual_rows=[])
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2024" / "june.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="25.06.2024",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="26.06.2024",
+        ex_tag="13.06.2024",
+        value_10286="0,2593",
+        value_10288="0,0303",
+        value_10289="-0,0538",
+    )
+    _write_oekb_file(
+        oekb_root / "2025" / "annual.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="15.01.2025",
+        jahresmeldung="JA",
+        ausschuettungsmeldung="NEIN",
+        meldezeitraum_beginn="01.07.2024",
+        meldezeitraum_ende="31.12.2024",
+        value_10289="-0,1000",
+    )
+
+    state_dir = tmp_path / "state"
+    run_workflow(
+        person="eugene",
+        tax_year=2024,
+        ibkr_tax_xml_path=tax_dir / "2024.xml",
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=state_dir,
+        output_dir=tmp_path / "output_2024",
+        opening_lots_path=opening_lots_path,
+        authoritative_start_date=date(2024, 5, 1),
+        carryforward_only=True,
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=tax_dir,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=state_dir,
+        output_dir=tmp_path / "output_2025",
+    )
+
+    basis_df = pl.read_csv(output_paths["basis_adjustments"])
+    ledger_df = pl.read_csv(output_paths["ledger"])
+
+    assert basis_df["effective_date"].to_list() == ["2025-01-15"]
+    assert basis_df["shares_held_on_eligibility_date"].to_list() == [14.0]
+    assert ledger_df["remaining_quantity"].sum() == 14.0
 
 
 def test_reporting_funds_workflow_resolves_same_year_distribution_and_writes_payout_state(tmp_path: Path) -> None:
@@ -734,15 +1255,13 @@ def test_reporting_funds_workflow_resolves_same_year_distribution_and_writes_pay
     resolution_df = pl.read_csv(output_paths["payout_resolution_events"])
     basis_df = pl.read_csv(output_paths["basis_adjustments"])
     income_df = pl.read_csv(output_paths["income_events"])
-    broker_row = income_df.filter(pl.col("event_type") == "broker_dividend_event").to_dicts()[0]
     deemed_row = income_df.filter(pl.col("event_type") == "oekb_deemed_distribution_10287").to_dicts()[0]
     credit_row = income_df.filter(pl.col("event_type") == "oekb_creditable_foreign_tax_10288").to_dicts()[0]
 
     assert payout_state_df["status"].to_list() == ["resolved_same_year_distribution"]
     assert resolution_df["resolution_mode"].to_list() == ["matched_same_year_distribution"]
     assert basis_df["basis_stepup_total_eur"].to_list() == [-0.735]
-    assert broker_row["broker_tax_amount_ccy"] == 0.11
-    assert broker_row["creditable_foreign_tax_total_ccy"] == 0.0
+    assert income_df.filter(pl.col("event_type") == "broker_dividend_event").is_empty()
     assert deemed_row["event_date"] == "2025-12-24"
     assert deemed_row["eligibility_date"] == "2025-12-11"
     assert deemed_row["amount_total_ccy"] == 0.12
@@ -861,7 +1380,7 @@ def test_reporting_funds_workflow_fails_when_same_year_payout_remains_unresolved
         )
 
 
-def test_reporting_funds_workflow_applies_historical_negative_deemed_distributed_income_as_annual_cleanup(tmp_path: Path) -> None:
+def test_reporting_funds_workflow_auto_applies_negative_deemed_distributed_income_with_single_linked_payout(tmp_path: Path) -> None:
     rates_path = tmp_path / "rates.csv"
     _write_rates_csv(
         rates_path,
@@ -887,7 +1406,48 @@ def test_reporting_funds_workflow_applies_historical_negative_deemed_distributed
         ],
     )
     tax_xml_path = tmp_path / "tax.xml"
-    _write_tax_xml(tax_xml_path, cash_rows=[], accrual_rows=[])
+    _write_tax_xml(
+        tax_xml_path,
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2024-06-26",
+                ex_date="2024-06-13",
+                amount="7.66",
+                action_id="linked-payout",
+                report_date="2024-06-27",
+            )
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-06-13",
+                effective_date="2024-06-12",
+                ex_date="2024-06-13",
+                pay_date="2024-06-26",
+                quantity="14",
+                code="Po",
+                action_id="linked-payout",
+                gross_rate="0.5471",
+                gross_amount="7.66",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-06-27",
+                effective_date="2024-06-26",
+                ex_date="2024-06-13",
+                pay_date="2024-06-26",
+                quantity="14",
+                code="Re",
+                action_id="linked-payout",
+                gross_rate="0.5471",
+                gross_amount="-7.66",
+            ),
+        ],
+    )
     oekb_root = tmp_path / "oekb"
     _write_oekb_file(
         oekb_root / "2025" / "annual.csv",
@@ -916,7 +1476,9 @@ def test_reporting_funds_workflow_applies_historical_negative_deemed_distributed
 
     review_df = pl.read_csv(output_paths["negative_deemed_distribution_review"])
     assert review_df.height == 1
-    assert review_df["status"].to_list() == ["applied_historical_annual_cleanup"]
+    assert review_df["status"].to_list() == ["applied_auto_reconciled_payout_set"]
+    assert review_df["candidate_payout_count"].to_list() == [1]
+    assert review_df["matched_payout_count"].to_list() == [1]
 
     income_df = pl.read_csv(output_paths["income_events"])
     negative_age_row = income_df.filter(pl.col("event_type") == "oekb_deemed_distribution_10287").to_dicts()[0]
@@ -926,6 +1488,315 @@ def test_reporting_funds_workflow_applies_historical_negative_deemed_distributed
     assert negative_age_row["amount_total_ccy"] == -0.9856
     assert credit_row["creditable_foreign_tax_total_ccy"] == 0.14
     assert basis_df["basis_stepup_total_ccy"].to_list() == [-0.7]
+
+
+def test_reporting_funds_workflow_uses_lookup_only_historical_ibkr_tax_xml_for_negative_deemed_validation(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2024-06-01", "USD", 1.0),
+            ("2025-01-15", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                trade_date="2024-06-01",
+                date_time="2024-06-01 10:00:00",
+                operation="BUY",
+                quantity="14",
+                price="100",
+                transaction_id="buy-1",
+            )
+        ],
+    )
+    main_tax_xml_path = tmp_path / "main_tax.xml"
+    _write_tax_xml(main_tax_xml_path, cash_rows=[], accrual_rows=[])
+    historical_tax_xml_path = tmp_path / "historical_tax.xml"
+    _write_tax_xml(
+        historical_tax_xml_path,
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2024-06-26",
+                ex_date="2024-06-13",
+                amount="7.66",
+                action_id="linked-payout",
+                report_date="2024-06-27",
+            )
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-06-13",
+                effective_date="2024-06-12",
+                ex_date="2024-06-13",
+                pay_date="2024-06-26",
+                quantity="14",
+                code="Po",
+                action_id="linked-payout",
+                gross_rate="0.5471",
+                gross_amount="7.66",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-06-27",
+                effective_date="2024-06-26",
+                ex_date="2024-06-13",
+                pay_date="2024-06-26",
+                quantity="14",
+                code="Re",
+                action_id="linked-payout",
+                gross_rate="0.5471",
+                gross_amount="-7.66",
+            ),
+        ],
+    )
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2025" / "annual.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="15.01.2025",
+        jahresmeldung="JA",
+        ausschuettungsmeldung="NEIN",
+        geschaeftsjahres_beginn="01.07.2023",
+        geschaeftsjahres_ende="30.06.2024",
+        value_10287="-0,0704",
+        value_10288="0,0100",
+        value_10289="-0,0500",
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=main_tax_xml_path,
+        historical_ibkr_tax_xml_path=historical_tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+        strict_unresolved_payouts=False,
+    )
+
+    review_df = pl.read_csv(output_paths["negative_deemed_distribution_review"])
+    income_df = pl.read_csv(output_paths["income_events"])
+    payout_df = pl.read_csv(output_paths["payout_state"])
+
+    assert review_df["status"].to_list() == ["applied_auto_reconciled_payout_set"]
+    assert income_df.filter(pl.col("event_type") == "broker_dividend_event").is_empty()
+    assert payout_df.is_empty()
+
+
+def test_reporting_funds_workflow_reconciles_negative_deemed_distribution_to_unique_multi_payout_subset(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2023-09-27", "USD", 1.0),
+            ("2023-12-27", "USD", 1.0),
+            ("2024-03-27", "USD", 1.0),
+            ("2024-06-01", "USD", 1.0),
+            ("2025-01-15", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                trade_date="2023-09-01",
+                date_time="2023-09-01 10:00:00",
+                operation="BUY",
+                quantity="4",
+                price="100",
+                transaction_id="buy-1",
+            ),
+            _trade_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                trade_date="2023-10-15",
+                date_time="2023-10-15 10:00:00",
+                operation="BUY",
+                quantity="10",
+                price="101",
+                transaction_id="buy-2",
+            ),
+        ],
+    )
+    main_tax_xml_path = tmp_path / "main_tax.xml"
+    _write_tax_xml(main_tax_xml_path, cash_rows=[], accrual_rows=[])
+    historical_tax_xml_path = tmp_path / "historical_tax.xml"
+    _write_tax_xml(
+        historical_tax_xml_path,
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2023-09-27",
+                ex_date="2023-09-14",
+                amount="1.07",
+                action_id="payout-1",
+                report_date="2023-09-27",
+            ),
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2023-12-27",
+                ex_date="2023-12-14",
+                amount="3.91",
+                action_id="payout-2",
+                report_date="2023-12-27",
+            ),
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2024-03-27",
+                ex_date="2024-03-14",
+                amount="4.23",
+                action_id="payout-3",
+                report_date="2024-03-27",
+            ),
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2023-09-27",
+                effective_date="2023-09-26",
+                ex_date="2023-09-14",
+                pay_date="2023-09-27",
+                quantity="4",
+                code="Po",
+                action_id="payout-1",
+                gross_rate="0.267572",
+                gross_amount="1.07",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2023-09-27",
+                effective_date="2023-09-27",
+                ex_date="2023-09-14",
+                pay_date="2023-09-27",
+                quantity="4",
+                code="Re",
+                action_id="payout-1",
+                gross_rate="0.267572",
+                gross_amount="-1.07",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2023-12-27",
+                effective_date="2023-12-26",
+                ex_date="2023-12-14",
+                pay_date="2023-12-27",
+                quantity="14",
+                code="Po",
+                action_id="payout-2",
+                gross_rate="0.279226",
+                gross_amount="3.91",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2023-12-27",
+                effective_date="2023-12-27",
+                ex_date="2023-12-14",
+                pay_date="2023-12-27",
+                quantity="14",
+                code="Re",
+                action_id="payout-2",
+                gross_rate="0.279226",
+                gross_amount="-3.91",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-03-27",
+                effective_date="2024-03-26",
+                ex_date="2024-03-14",
+                pay_date="2024-03-27",
+                quantity="14",
+                code="Po",
+                action_id="payout-3",
+                gross_rate="0.302416",
+                gross_amount="4.23",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2024-03-27",
+                effective_date="2024-03-27",
+                ex_date="2024-03-14",
+                pay_date="2024-03-27",
+                quantity="14",
+                code="Re",
+                action_id="payout-3",
+                gross_rate="0.302416",
+                gross_amount="-4.23",
+            ),
+        ],
+    )
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2025" / "annual.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="15.01.2025",
+        jahresmeldung="JA",
+        ausschuettungsmeldung="NEIN",
+        geschaeftsjahres_beginn="01.07.2023",
+        geschaeftsjahres_ende="30.06.2024",
+        value_10287="-0,0704",
+        value_10595="0,5468",
+        value_10288="0,0671",
+        value_10289="-0,1646",
+        value_10047="0,5468",
+        value_10055="0,5468",
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=main_tax_xml_path,
+        historical_ibkr_tax_xml_path=historical_tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+        strict_unresolved_payouts=False,
+    )
+
+    review_df = pl.read_csv(output_paths["negative_deemed_distribution_review"])
+    income_df = pl.read_csv(output_paths["income_events"])
+    basis_df = pl.read_csv(output_paths["basis_adjustments"])
+
+    assert review_df["status"].to_list() == ["applied_auto_reconciled_payout_set"]
+    assert review_df["candidate_payout_count"].to_list() == [3]
+    assert review_df["matched_payout_count"].to_list() == [2]
+    assert review_df["matched_payout_dates"].to_list() == ["2023-09-27|2023-12-27"]
+    assert review_df["eligible_quantity_used"].to_list() == [4.0]
+    assert review_df["target_distribution_per_share_ccy"].to_list() == [0.5468]
+
+    negative_age_row = income_df.filter(pl.col("event_type") == "oekb_deemed_distribution_10287").to_dicts()[0]
+    credit_row = income_df.filter(pl.col("event_type") == "oekb_creditable_foreign_tax_10288").to_dicts()[0]
+
+    assert negative_age_row["quantity"] == 4.0
+    assert negative_age_row["amount_total_ccy"] == -0.2816
+    assert credit_row["creditable_foreign_tax_total_ccy"] == 0.2684
+    assert basis_df["basis_stepup_total_ccy"].to_list() == [-0.6584]
 
 
 def test_reporting_funds_workflow_writes_negative_deemed_distribution_review_and_blocks_without_override(tmp_path: Path) -> None:
@@ -1169,6 +2040,255 @@ def test_reporting_funds_workflow_resolves_2025_payout_from_2026_annual_10595(tm
     assert payout_state_df["status"].to_list() == ["resolved_later_year_annual_report"]
 
 
+def test_reporting_funds_workflow_uses_confirmed_cash_events_directly_for_annual_10595(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2025-01-01", "USD", 1.0),
+            ("2025-01-15", "USD", 1.0),
+            ("2025-03-20", "USD", 1.0),
+            ("2025-04-02", "USD", 1.0),
+            ("2025-06-19", "USD", 1.0),
+            ("2025-07-02", "USD", 1.0),
+            ("2026-01-16", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                trade_date="2025-01-01",
+                date_time="2025-01-01 10:00:00",
+                operation="BUY",
+                quantity="14",
+                price="100",
+                transaction_id="buy-1",
+            )
+        ],
+    )
+    tax_xml_path = tmp_path / "tax.xml"
+    _write_tax_xml(
+        tax_xml_path,
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2025-04-02",
+                ex_date="2025-03-20",
+                amount="4.49",
+                action_id="vusd-q1",
+                report_date="2025-04-03",
+            ),
+            _cash_dividend_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                settle_date="2025-07-02",
+                ex_date="2025-06-19",
+                amount="4.38",
+                action_id="vusd-q2",
+                report_date="2025-07-03",
+            ),
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2025-03-20",
+                effective_date="2025-03-19",
+                ex_date="2025-03-20",
+                pay_date="2025-04-02",
+                quantity="14",
+                code="Po",
+                action_id="vusd-q1",
+                gross_rate="0.32063",
+                gross_amount="4.49",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2025-04-03",
+                effective_date="2025-04-02",
+                ex_date="2025-03-20",
+                pay_date="2025-04-02",
+                quantity="14",
+                code="Re",
+                action_id="vusd-q1",
+                gross_rate="0.32063",
+                gross_amount="-4.49",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2025-06-19",
+                effective_date="2025-06-18",
+                ex_date="2025-06-19",
+                pay_date="2025-07-02",
+                quantity="14",
+                code="Po",
+                action_id="vusd-q2",
+                gross_rate="0.31292",
+                gross_amount="4.38",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2025-07-03",
+                effective_date="2025-07-02",
+                ex_date="2025-06-19",
+                pay_date="2025-07-02",
+                quantity="14",
+                code="Re",
+                action_id="vusd-q2",
+                gross_rate="0.31292",
+                gross_amount="-4.38",
+            ),
+        ],
+    )
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2025" / "annual_2025.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="15.01.2025",
+        jahresmeldung="JA",
+        ausschuettungsmeldung="NEIN",
+        meldezeitraum_beginn="01.01.2024",
+        meldezeitraum_ende="31.12.2024",
+    )
+    _write_oekb_file(
+        oekb_root / "2026" / "annual_2026.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="16.01.2026",
+        jahresmeldung="JA",
+        ausschuettungsmeldung="NEIN",
+        meldezeitraum_beginn="01.01.2025",
+        meldezeitraum_ende="31.12.2025",
+        value_10595="0,63355",
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+        resolution_cutoff_date="2026-04-30",
+    )
+
+    income_df = pl.read_csv(output_paths["income_events"]).filter(pl.col("event_type") == "oekb_non_reported_distribution_10595")
+
+    assert income_df["event_date"].to_list() == ["2025-04-02", "2025-07-02"]
+    assert income_df["amount_total_ccy"].to_list() == [4.49, 4.38]
+    assert income_df["quantity"].to_list() == [14.0, 14.0]
+
+
+def test_reporting_funds_workflow_does_not_emit_10595_for_accrual_only_payouts(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2025-01-01", "USD", 1.0),
+            ("2025-01-15", "USD", 1.0),
+            ("2025-12-18", "USD", 1.0),
+            ("2025-12-31", "USD", 1.0),
+            ("2026-01-16", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                trade_date="2025-01-01",
+                date_time="2025-01-01 10:00:00",
+                operation="BUY",
+                quantity="14",
+                price="100",
+                transaction_id="buy-1",
+            )
+        ],
+    )
+    tax_xml_path = tmp_path / "tax.xml"
+    _write_tax_xml(
+        tax_xml_path,
+        cash_rows=[],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2025-12-18",
+                effective_date="2025-12-17",
+                ex_date="2025-12-18",
+                pay_date="2025-12-31",
+                quantity="14",
+                code="Po",
+                action_id="vusd-accrual-only",
+                gross_rate="0.299286",
+                gross_amount="4.19",
+            ),
+            _accrual_row(
+                ticker="VUSD",
+                isin="IE00B3XXRP09",
+                report_date="2026-01-02",
+                effective_date="2025-12-31",
+                ex_date="2025-12-18",
+                pay_date="2025-12-31",
+                quantity="14",
+                code="Re",
+                action_id="vusd-accrual-only",
+                gross_rate="0.299286",
+                gross_amount="-4.19",
+            ),
+        ],
+    )
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2025" / "annual_2025.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="15.01.2025",
+        jahresmeldung="JA",
+        ausschuettungsmeldung="NEIN",
+        meldezeitraum_beginn="01.01.2024",
+        meldezeitraum_ende="31.12.2024",
+    )
+    _write_oekb_file(
+        oekb_root / "2026" / "annual_2026.csv",
+        isin="IE00B3XXRP09",
+        meldedatum="16.01.2026",
+        jahresmeldung="JA",
+        ausschuettungsmeldung="NEIN",
+        meldezeitraum_beginn="01.01.2025",
+        meldezeitraum_ende="31.12.2025",
+        value_10595="0,299286",
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+        resolution_cutoff_date="2026-04-30",
+    )
+
+    income_df = pl.read_csv(output_paths["income_events"])
+    payout_df = pl.read_csv(output_paths["payout_state"])
+
+    assert income_df.filter(pl.col("event_type") == "oekb_non_reported_distribution_10595").is_empty()
+    assert payout_df["status"].to_list() == ["accrual_realized_cash_missing"]
+
+
 def test_reporting_funds_workflow_keeps_broker_cash_payout_when_annual_period_does_not_cover_pay_date(tmp_path: Path) -> None:
     rates_path = tmp_path / "rates.csv"
     _write_rates_csv(
@@ -1281,3 +2401,244 @@ def test_reporting_funds_workflow_keeps_broker_cash_payout_when_annual_period_do
     assert "## Next Reporting Period Inputs" in summary_text
     assert "`" + str((tmp_path / "state" / "fund_tax_ledger_2025_final.csv").as_posix()) + "`" in summary_text
     assert "`" + str((tmp_path / "state" / "fund_tax_payout_state.csv").as_posix()) + "`" in summary_text
+
+
+def test_reporting_funds_workflow_defers_distribution_report_without_confirmed_cash(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2025-01-01", "USD", 1.0),
+            ("2025-12-11", "USD", 1.0),
+            ("2025-12-24", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                trade_date="2025-01-01",
+                date_time="2025-01-01 10:00:00",
+                operation="BUY",
+                quantity="10",
+                price="3.5",
+                transaction_id="buy-1",
+            )
+        ],
+    )
+    tax_xml_path = tmp_path / "tax.xml"
+    _write_tax_xml(
+        tax_xml_path,
+        cash_rows=[],
+        accrual_rows=[
+            _accrual_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                report_date="2025-12-11",
+                effective_date="2025-12-10",
+                ex_date="2025-12-11",
+                pay_date="2025-12-24",
+                quantity="10",
+                code="Po",
+                action_id="idtl-deferred",
+                gross_rate="0.0735",
+                gross_amount="0.735",
+            ),
+            _accrual_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                report_date="2025-12-30",
+                effective_date="2025-12-24",
+                ex_date="2025-12-11",
+                pay_date="2025-12-24",
+                quantity="10",
+                code="Re",
+                action_id="idtl-deferred",
+                gross_rate="0.0735",
+                gross_amount="-0.735",
+            ),
+        ],
+    )
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2025" / "idtl_distribution.csv",
+        isin="IE00BSKRJZ44",
+        meldedatum="22.12.2025",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="24.12.2025",
+        ex_tag="11.12.2025",
+        value_10286="0,0100",
+        value_10288="0,0030",
+        value_10289="-0,0735",
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+    )
+
+    income_df = pl.read_csv(output_paths["income_events"])
+    basis_df = pl.read_csv(output_paths["basis_adjustments"])
+    payout_df = pl.read_csv(output_paths["payout_state"])
+    evidence_review_df = pl.read_csv(output_paths["payout_evidence_review"])
+
+    assert income_df.is_empty()
+    assert basis_df.is_empty()
+    assert payout_df["status"].to_list() == ["accrual_realized_cash_missing"]
+    assert payout_df["evidence_state"].to_list() == ["accrual_realized_cash_missing"]
+    assert evidence_review_df["status"].to_list() == ["accrual_realized_cash_missing"]
+
+
+def test_reporting_funds_workflow_clears_stale_resolved_status_when_rerun_has_only_pending_accrual_evidence(
+    tmp_path: Path,
+) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2025-01-01", "USD", 1.0),
+            ("2025-12-11", "USD", 1.0),
+            ("2025-12-24", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                trade_date="2025-01-01",
+                date_time="2025-01-01 10:00:00",
+                operation="BUY",
+                quantity="10",
+                price="3.5",
+                transaction_id="buy-1",
+            )
+        ],
+    )
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2025" / "idtl_distribution.csv",
+        isin="IE00BSKRJZ44",
+        meldedatum="22.12.2025",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="24.12.2025",
+        ex_tag="11.12.2025",
+        value_10286="0,0100",
+        value_10288="0,0030",
+        value_10289="-0,0735",
+    )
+
+    first_tax_xml_path = tmp_path / "first_tax.xml"
+    _write_tax_xml(
+        first_tax_xml_path,
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                settle_date="2025-12-24",
+                ex_date="2025-12-11",
+                amount="0.735",
+                action_id="idtl-stale",
+                report_date="2025-12-24",
+            )
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                report_date="2025-12-11",
+                effective_date="2025-12-10",
+                ex_date="2025-12-11",
+                pay_date="2025-12-24",
+                quantity="10",
+                code="Po",
+                action_id="idtl-stale",
+                gross_rate="0.0735",
+                gross_amount="0.735",
+            ),
+            _accrual_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                report_date="2025-12-30",
+                effective_date="2025-12-24",
+                ex_date="2025-12-11",
+                pay_date="2025-12-24",
+                quantity="10",
+                code="Re",
+                action_id="idtl-stale",
+                gross_rate="0.0735",
+                gross_amount="-0.735",
+            ),
+        ],
+    )
+
+    state_dir = tmp_path / "state"
+    output_dir = tmp_path / "output-first"
+    run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=first_tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=state_dir,
+        output_dir=output_dir,
+    )
+
+    second_tax_xml_path = tmp_path / "second_tax.xml"
+    _write_tax_xml(
+        second_tax_xml_path,
+        cash_rows=[],
+        accrual_rows=[
+            _accrual_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                report_date="2025-12-11",
+                effective_date="2025-12-10",
+                ex_date="2025-12-11",
+                pay_date="2025-12-24",
+                quantity="10",
+                code="Po",
+                action_id="idtl-stale",
+                gross_rate="0.0735",
+                gross_amount="0.735",
+            )
+        ],
+    )
+
+    rerun_output_paths = run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=second_tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=state_dir,
+        output_dir=tmp_path / "output-second",
+    )
+
+    payout_df = pl.read_csv(rerun_output_paths["payout_state"])
+    evidence_review_df = pl.read_csv(rerun_output_paths["payout_evidence_review"])
+
+    assert payout_df["status"].to_list() == ["accrual_pre_payout_only"]
+    assert payout_df["evidence_state"].to_list() == ["accrual_pre_payout_only"]
+    assert payout_df["resolved_tax_year"].to_list() == [""]
+    assert payout_df["resolved_by_report_year"].to_list() == [""]
+    assert payout_df["resolved_by_report_file"].to_list() == [""]
+    assert payout_df["resolution_mode"].to_list() == [""]
+    assert payout_df["notes"].to_list() == ["cash_row_missing"]
+    assert evidence_review_df["status"].to_list() == ["accrual_pre_payout_only"]
+    assert evidence_review_df["notes"].to_list() == ["cash_row_missing"]

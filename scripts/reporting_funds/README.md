@@ -87,9 +87,9 @@ If an annual report is published in the target tax year but its covered business
 
 If annual `10287` is negative:
 
-- historical pre-lock reports are auto-applied as annual cleanup using quantity held on report date
-- non-historical cases go through the manual review override workflow
-- overrides may still explicitly choose `ignore_as_frozen_history`, `apply_full`, `apply_partial`, or `unresolved_block`
+- a single deterministically linked broker payout in the report period may be auto-applied
+- otherwise the case goes through the manual review override workflow
+- overrides may explicitly choose `ignore`, `apply_full`, `apply_partial`, or `unresolved_block`
 
 Practical consequence:
 
@@ -97,17 +97,6 @@ Practical consequence:
 - unresolved post-2024 payouts block the run by default
 - next-year annual reports may be read as lookahead evidence to resolve prior-year payouts, especially for `10595`
 - negative deemed distributed income is handled through a review-and-override workflow
-
-## Historical Lock
-
-`2024` is treated as already filed historical context.
-
-- 2024 ETF payouts are loaded from broker XML only for audit and matching context
-- they are marked as locked history
-- the workflow does not reopen 2024 tax treatment
-- the workflow does not retro-apply 2024 OeKB basis corrections
-
-This means:
 
 - `2025` is the first year this ETF workflow is treated as authoritative
 - opening 2025 lot basis is not rewritten using pre-2025 OeKB corrections
@@ -169,7 +158,7 @@ Override CSV columns:
 
 Supported decisions:
 
-- `ignore_as_frozen_history`
+- `ignore`
 - `apply_full`
 - `apply_partial`
 - `unresolved_block`

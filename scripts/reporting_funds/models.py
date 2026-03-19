@@ -143,6 +143,7 @@ class BrokerDividendEvent:
     cash_amount: float | None = None
     accrual_amount: float | None = None
     matching_notes: str = ""
+    evidence_state: str = "confirmed_cash"
 
     @property
     def event_id(self) -> str:
@@ -165,6 +166,7 @@ class PayoutStateRow:
     broker_net_amount_ccy: float
     broker_tax_amount_ccy: float
     source_tax_year: int
+    evidence_state: str
     status: str
     resolved_tax_year: str = ""
     resolved_by_report_year: str = ""
@@ -192,6 +194,7 @@ class PayoutStateRow:
             "broker_net_amount_ccy": round_money(self.broker_net_amount_ccy),
             "broker_tax_amount_ccy": round_money(self.broker_tax_amount_ccy),
             "source_tax_year": self.source_tax_year,
+            "evidence_state": self.evidence_state,
             "status": self.status,
             "resolved_tax_year": self.resolved_tax_year,
             "resolved_by_report_year": self.resolved_by_report_year,

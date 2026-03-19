@@ -433,10 +433,12 @@ def build_broker_dividend_events(
                     cash_amount=cash_amount,
                     accrual_amount=accrual_amount,
                     matching_notes=notes,
+                    evidence_state="confirmed_cash",
                 )
             )
             continue
 
+        evidence_state = "accrual_realized_cash_missing" if event.has_re else "accrual_pre_payout_only"
         events.append(
             BrokerDividendEvent(
                 ticker=event.ticker,
@@ -456,6 +458,7 @@ def build_broker_dividend_events(
                 cash_amount=None,
                 accrual_amount=round_money(abs(event.gross_amount or 0.0)),
                 matching_notes="cash_row_missing",
+                evidence_state=evidence_state,
             )
         )
 
