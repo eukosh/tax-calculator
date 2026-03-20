@@ -10,6 +10,7 @@ import polars as pl
 
 from scripts.reporting_funds.models import IbkrTrade, Lot, round_money, round_qty
 from scripts.reporting_funds.workflow import apply_trade, build_fx_table, get_fx_rate
+from src.tax_lots import RawBrokerTrade, load_ibkr_stock_like_trades
 
 RAW_IBKR_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 SUPPORTED_ASSET_CLASSES = {"ETF", "COMMON", "REIT", "ADR"}
@@ -19,6 +20,7 @@ SUPPORTED_ASSET_CLASSES = {"ETF", "COMMON", "REIT", "ADR"}
 class BasisTrade:
     trade: IbkrTrade
     asset_class: str
+    fee_ccy: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -49,74 +51,31 @@ def _parse_trade_datetime(row: etree._Element) -> datetime:
 
 
 def load_ibkr_stock_and_etf_trades(xml_file_path: str, *, cutoff_date: date) -> list[BasisTrade]:
-    file_paths = _resolve_file_paths(xml_file_path)
-    if not file_paths:
-        raise FileNotFoundError(f"No files matched the pattern: {xml_file_path}")
-
-    seen_rows: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
-    trades: list[BasisTrade] = []
-
-    for path in file_paths:
-        root = etree.parse(path).getroot()
-        for parent_tag in (".//TradeConfirms", ".//Trades"):
-            for parent in root.findall(parent_tag):
-                for row in parent:
-                    if row.tag not in {"TradeConfirm", "Trade"}:
-                        continue
-                    row_key = (row.tag, tuple(sorted(row.items())))
-                    if row_key in seen_rows:
-                        continue
-                    seen_rows.add(row_key)
-
-                    if (row.get("assetCategory") or "").strip() != "STK":
-                        continue
-                    asset_class = (row.get("subCategory") or "").strip()
-                    if asset_class not in SUPPORTED_ASSET_CLASSES:
-                        continue
-
-                    buy_sell = (row.get("buySell") or "").strip().upper()
-                    if buy_sell not in {"BUY", "SELL"}:
-                        continue
-
-                    trade_datetime = _parse_trade_datetime(row)
-                    if trade_datetime.date() >= cutoff_date:
-                        continue
-
-                    trade_price = row.get("tradePrice") or row.get("price")
-                    quantity = row.get("quantity")
-                    currency = row.get("currency")
-                    symbol = row.get("symbol")
-                    isin = row.get("isin") or row.get("securityID")
-                    if not all([trade_price, quantity, currency, symbol, isin]):
-                        raise ValueError("IBKR raw stock/ETF trade row is missing required fields")
-
-                    trade_id = (
-                        row.get("tradeID")
-                        or row.get("transactionID")
-                        or row.get("ibOrderID")
-                        or f"{symbol}:{trade_datetime.isoformat()}:{buy_sell}"
-                    )
-
-                    trades.append(
-                        BasisTrade(
-                            trade=IbkrTrade(
-                                ticker=symbol.strip(),
-                                isin=isin.strip(),
-                                trade_date=trade_datetime.date(),
-                                trade_datetime=trade_datetime,
-                                operation=buy_sell.lower(),
-                                quantity=round_qty(abs(float(quantity))),
-                                price_ccy=round_money(float(trade_price)),
-                                currency=currency.strip(),
-                                trade_id=trade_id.strip(),
-                                account_id=(row.get("accountId") or "").strip(),
-                                source_statement_file=path,
-                            ),
-                            asset_class=asset_class,
-                        )
-                    )
-
-    trades.sort(key=lambda item: (item.trade.trade_datetime, item.trade.trade_id, item.trade.operation))
+    raw_trades = load_ibkr_stock_like_trades(
+        xml_file_path,
+        allowed_asset_classes=SUPPORTED_ASSET_CLASSES,
+        cutoff_date=cutoff_date,
+    )
+    trades: list[BasisTrade] = [
+        BasisTrade(
+            trade=IbkrTrade(
+                ticker=trade.ticker,
+                isin=trade.isin,
+                trade_date=trade.trade_date,
+                trade_datetime=trade.trade_datetime,
+                operation=trade.operation,
+                quantity=trade.quantity,
+                price_ccy=trade.price_ccy,
+                currency=trade.currency,
+                trade_id=trade.trade_id,
+                account_id=trade.account_id,
+                source_statement_file=trade.source_statement_file,
+            ),
+            asset_class=trade.asset_class,
+            fee_ccy=trade.fee_ccy,
+        )
+        for trade in raw_trades
+    ]
     if not trades:
         raise ValueError("No pre-cutoff IBKR stock/ETF BUY/SELL trades were found.")
     return trades
@@ -229,6 +188,7 @@ def _snapshot_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
         "buy_price_ccy": pl.Float64,
         "buy_fx_to_eur": pl.Float64,
         "original_cost_eur": pl.Float64,
+        "buy_fee_eur_total": pl.Float64,
         "cumulative_oekb_stepup_eur": pl.Float64,
         "adjusted_basis_eur": pl.Float64,
         "status": pl.String,
@@ -245,6 +205,7 @@ def _snapshot_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
         "broker_buy_price_ccy": pl.Float64,
         "broker_buy_fx_to_eur": pl.Float64,
         "broker_original_cost_eur": pl.Float64,
+        "broker_buy_fee_eur": pl.Float64,
         "austrian_basis_method": pl.String,
         "austrian_basis_price_ccy": pl.Float64,
         "austrian_basis_fx_to_eur": pl.Float64,
@@ -277,11 +238,13 @@ def build_opening_lot_snapshot(
 
     lots: list[Lot] = []
     asset_class_by_lot_id: dict[str, str] = {}
+    broker_buy_fee_eur_by_lot_id: dict[str, float] = {}
     for basis_trade in basis_trades:
         apply_trade(lots, basis_trade.trade, fx_table=fx_table, sale_rows=None, track_ytd=False)
         if basis_trade.trade.operation == "buy":
             created_lot = lots[-1]
             asset_class_by_lot_id[created_lot.lot_id] = basis_trade.asset_class
+            broker_buy_fee_eur_by_lot_id[created_lot.lot_id] = round_money(basis_trade.fee_ccy / created_lot.buy_fx_to_eur)
 
     holdings = _build_snapshot_holdings(lots, asset_class_by_lot_id)
     try:
@@ -342,6 +305,7 @@ def build_opening_lot_snapshot(
                 "buy_price_ccy": round_money(basis_price_ccy),
                 "buy_fx_to_eur": round_money(basis_fx),
                 "original_cost_eur": original_cost_eur,
+                "buy_fee_eur_total": 0.0,
                 "cumulative_oekb_stepup_eur": 0.0,
                 "adjusted_basis_eur": original_cost_eur,
                 "status": "open",
@@ -358,6 +322,7 @@ def build_opening_lot_snapshot(
                 "broker_buy_price_ccy": round_money(lot.buy_price_ccy),
                 "broker_buy_fx_to_eur": round_money(lot.buy_fx_to_eur),
                 "broker_original_cost_eur": round_money(lot.original_cost_eur),
+                "broker_buy_fee_eur": round_money(broker_buy_fee_eur_by_lot_id.get(lot.lot_id, 0.0)),
                 "austrian_basis_method": "move_in_fmv_reset",
                 "austrian_basis_price_ccy": round_money(basis_price_ccy),
                 "austrian_basis_fx_to_eur": round_money(basis_fx),

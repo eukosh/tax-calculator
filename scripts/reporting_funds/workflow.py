@@ -27,6 +27,7 @@ from scripts.reporting_funds.models import (
 from scripts.reporting_funds.oekb_csv import load_matching_oekb_reports, load_required_oekb_reports
 from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
 from src.currencies import ExchangeRates, ExchangeRatesCacheError
+from src.tax_lots import consume_fifo_sell
 
 NEGATIVE_DEEMED_DISTRIBUTION_IGNORE = "ignore"
 NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL = "apply_full"
@@ -270,55 +271,35 @@ def _apply_sell(
     sale_rows: list[dict[str, object]] | None,
     track_ytd: bool,
 ) -> None:
-    quantity_left = round_qty(trade.quantity)
     sale_fx = get_fx_rate(fx_table, trade.currency, trade.trade_date)
-
-    for lot in lots:
-        if quantity_left <= 0:
-            break
-        if lot.isin != trade.isin or lot.remaining_quantity <= 0:
-            continue
-
-        quantity_from_lot = min(lot.remaining_quantity, quantity_left)
-        fraction = quantity_from_lot / lot.remaining_quantity
-        original_basis_eur = round_money(lot.original_cost_eur * fraction)
-        stepup_basis_eur = round_money(lot.cumulative_oekb_stepup_eur * fraction)
-        taxable_basis_eur = round_money(original_basis_eur + stepup_basis_eur)
-        taxable_proceeds_eur = round_money((quantity_from_lot * trade.price_ccy) / sale_fx)
-
-        if sale_rows is not None:
-            sale_rows.append(
-                {
-                    "sale_date": trade.trade_date.isoformat(),
-                    "ticker": trade.ticker,
-                    "isin": trade.isin,
-                    "quantity_sold": round_qty(trade.quantity),
-                    "sale_price_ccy": round_money(trade.price_ccy),
-                    "sale_fx": round_money(sale_fx),
-                    "lot_id": lot.lot_id,
-                    "lot_buy_date": lot.buy_date.isoformat(),
-                    "quantity_from_lot": round_qty(quantity_from_lot),
-                    "taxable_proceeds_eur": taxable_proceeds_eur,
-                    "taxable_original_basis_eur": original_basis_eur,
-                    "taxable_stepup_basis_eur": stepup_basis_eur,
-                    "taxable_total_basis_eur": taxable_basis_eur,
-                    "taxable_gain_loss_eur": round_money(taxable_proceeds_eur - taxable_basis_eur),
-                    "notes": "FIFO sale result uses original EUR basis plus cumulative OeKB acquisition-cost corrections.",
-                }
-            )
-
-        lot.remaining_quantity = round_qty(lot.remaining_quantity - quantity_from_lot)
-        lot.original_cost_eur = round_money(lot.original_cost_eur - original_basis_eur)
-        lot.cumulative_oekb_stepup_eur = round_money(lot.cumulative_oekb_stepup_eur - stepup_basis_eur)
-        lot.status = "closed" if lot.remaining_quantity == 0 else "partially_sold"
-        if track_ytd:
-            lot.sold_quantity_ytd = round_qty(lot.sold_quantity_ytd + quantity_from_lot)
-            lot.last_sale_date = trade.trade_date.isoformat()
-
-        quantity_left = round_qty(quantity_left - quantity_from_lot)
-
-    if quantity_left > 0:
-        raise ValueError(f"Sell of {trade.ticker} on {trade.trade_date} exceeds available quantity")
+    allocations = consume_fifo_sell(
+        lots,
+        trade,
+        sale_fx=sale_fx,
+        track_ytd=track_ytd,
+    )
+    if sale_rows is None:
+        return
+    for allocation in allocations:
+        sale_rows.append(
+            {
+                "sale_date": allocation["sale_date"],
+                "ticker": allocation["ticker"],
+                "isin": allocation["isin"],
+                "quantity_sold": allocation["quantity_sold"],
+                "sale_price_ccy": allocation["sale_price_ccy"],
+                "sale_fx": allocation["sale_fx"],
+                "lot_id": allocation["lot_id"],
+                "lot_buy_date": allocation["lot_buy_date"],
+                "quantity_from_lot": allocation["quantity_from_lot"],
+                "taxable_proceeds_eur": allocation["taxable_proceeds_eur"],
+                "taxable_original_basis_eur": allocation["taxable_original_basis_eur"],
+                "taxable_stepup_basis_eur": allocation["taxable_stepup_basis_eur"],
+                "taxable_total_basis_eur": allocation["taxable_total_basis_eur"],
+                "taxable_gain_loss_eur": allocation["taxable_gain_loss_eur"],
+                "notes": "FIFO sale result uses original EUR basis plus cumulative OeKB acquisition-cost corrections.",
+            }
+        )
 
 
 def apply_trade(

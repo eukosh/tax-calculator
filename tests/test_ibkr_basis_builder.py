@@ -59,11 +59,15 @@ def _trade_row(
     price: str,
     transaction_id: str,
     sub_category: str,
+    extra_attrs: dict[str, str] | None = None,
 ) -> str:
+    extra = ""
+    if extra_attrs:
+        extra = " " + " ".join(f'{key}="{value}"' for key, value in extra_attrs.items())
     return (
         f"<Trade accountId=\"U1\" symbol=\"{ticker}\" isin=\"{isin}\" subCategory=\"{sub_category}\" assetCategory=\"STK\" "
         f"currency=\"USD\" tradeDate=\"{trade_date}\" dateTime=\"{date_time}\" buySell=\"{operation}\" "
-        f"quantity=\"{quantity}\" tradePrice=\"{price}\" transactionID=\"{transaction_id}\" />"
+        f"quantity=\"{quantity}\" tradePrice=\"{price}\" transactionID=\"{transaction_id}\"{extra} />"
     )
 
 
@@ -197,6 +201,58 @@ def test_build_opening_lot_snapshot_resets_pre_cutoff_open_stock_and_etf_lots(tm
     assert snapshot_df["remaining_quantity"].to_list() == [2.0, 7.0]
     assert snapshot_df["original_cost_eur"].to_list() == [400.0, 840.0]
     assert snapshot_df["austrian_basis_method"].to_list() == ["move_in_fmv_reset", "move_in_fmv_reset"]
+
+
+def test_build_opening_lot_snapshot_keeps_broker_gross_cost_and_fee_provenance_separately(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2024-04-15", "USD", 1.0),
+            ("2024-05-01", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="AAPL",
+                isin="US0378331005",
+                trade_date="2024-04-15",
+                date_time="2024-04-15 10:00:00",
+                operation="BUY",
+                quantity="2",
+                price="170",
+                transaction_id="aapl-buy",
+                sub_category="COMMON",
+                extra_attrs={"commission": "-1.25", "netCash": "-341.25"},
+            ),
+        ],
+    )
+    prices_path = tmp_path / "prices.csv"
+    _write_price_csv(
+        prices_path,
+        [
+            ("AAPL", "US0378331005", "2024-05-01", 200.0, "USD"),
+        ],
+    )
+    output_path = tmp_path / "opening_lots.csv"
+
+    build_opening_lot_snapshot(
+        person="eugene",
+        cutoff_date=date(2024, 5, 1),
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        move_in_price_csv_path=prices_path,
+        output_path=output_path,
+    )
+
+    snapshot_df = pl.read_csv(output_path)
+    assert snapshot_df["original_cost_eur"].to_list() == [400.0]
+    assert snapshot_df["buy_fee_eur_total"].to_list() == [0.0]
+    assert snapshot_df["broker_original_cost_eur"].to_list() == [340.0]
+    assert snapshot_df["broker_buy_fee_eur"].to_list() == [1.25]
 
 
 def test_build_opening_lot_snapshot_writes_price_template_when_prices_are_missing(tmp_path: Path) -> None:

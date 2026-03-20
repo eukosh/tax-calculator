@@ -3,16 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-MONEY_DIGITS = 6
-QTY_DIGITS = 8
-
-
-def round_money(value: float) -> float:
-    return round(float(value), MONEY_DIGITS)
-
-
-def round_qty(value: float) -> float:
-    return round(float(value), QTY_DIGITS)
+from src.tax_lots import round_money, round_qty
 
 
 def _append_unique_note_text(existing: str, incoming: str) -> str:

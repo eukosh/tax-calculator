@@ -88,6 +88,8 @@ TLT.US,2026-03-17,43,87.21
 
 ## How To Run
 
+The commands below are intended to be copy-pasted and then edited only where your paths or person differ.
+
 From repo root:
 
 ```bash
@@ -247,3 +249,14 @@ Official source basis:
 
 - [`E1kv` form instructions](https://formulare.bmf.gv.at/service/formulare/inter-Steuern/pdfs/2015/E1kv.pdf?open=download): actual fund distributions on foreign depots go to Kennzahl `898`, and `ausschüttungsgleiche Erträge` on foreign depots go to Kennzahl `937`
 - [`InvFR 2018` BMF guidance](https://findok.bmf.gv.at/findok/iwg/74/74706/74706.1.pdf): the `ausschüttungsgleiche Erträge` are captured in `E1kv` under Kennzahl `937`, while the acquisition-cost adjustment is used later for sale-basis calculation
+
+## Documentation
+
+Workflow overview:
+
+- top-level repo doc: [`README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/README.md)
+
+Schema and artifact glossary:
+
+- glossary index: [`docs/glossary/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/docs/glossary/README.md)
+- non-reporting-funds glossary: [`docs/glossary/non-reporting-funds.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/docs/glossary/non-reporting-funds.md)
