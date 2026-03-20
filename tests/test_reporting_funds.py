@@ -2499,7 +2499,22 @@ def test_reporting_funds_workflow_keeps_broker_cash_payout_when_annual_period_do
     assert income_df.filter(pl.col("event_type") == "broker_dividend_event")["amount_total_ccy"].to_list() == [4.1]
     assert payout_state_df["status"].to_list() == ["resolved_broker_cash_outside_oekb_period"]
     assert resolution_df["resolution_mode"].to_list() == ["broker_cash_outside_oekb_period"]
-    assert "`ETF distributions 27.5%`: `32.169500 EUR`" in summary_text
+    filing_distribution_total_eur = income_df.filter(
+        pl.col("event_type").is_in(["oekb_reported_distribution_10286", "oekb_non_reported_distribution_10595"])
+        | (
+            (pl.col("event_type") == "broker_dividend_event")
+            & pl.col("matched_broker_event_id").cast(pl.String).is_in(
+                payout_state_df.filter(pl.col("resolution_mode") == "broker_cash_outside_oekb_period")["payout_key"]
+                .cast(pl.String)
+                .to_list()
+            )
+        )
+    )["amount_total_eur"].sum()
+    filing_deemed_total_eur = income_df.filter(pl.col("event_type") == "oekb_deemed_distribution_10287")[
+        "amount_total_eur"
+    ].sum()
+    assert f"`ETF distributions 27.5%`: `{filing_distribution_total_eur:.6f} EUR`" in summary_text
+    assert f"`Ausschüttungsgleiche Erträge 27.5%`: `{filing_deemed_total_eur:.6f} EUR`" in summary_text
     assert "`Creditable foreign tax`: `2.317750 EUR`" in summary_text
     assert "`diagnostic_total_income_eur`: `32.169500 EUR`" in summary_text
     assert "open lots `1`, open quantity `2.5`, original basis `250.000000 EUR`" in summary_text

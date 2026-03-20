@@ -265,6 +265,7 @@ Start from:
 For example, the current 2025 Eugene summary gives:
 
 - `ETF distributions 27.5%`
+- `Ausschüttungsgleiche Erträge 27.5%`
 - `Creditable foreign tax`
 
 Use the summary as your filing input for the reporting-fund ETF section.

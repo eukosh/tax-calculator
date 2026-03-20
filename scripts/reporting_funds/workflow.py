@@ -1202,19 +1202,25 @@ def write_summary(
             .to_list()
         )
 
-    filing_event_types = {
+    filing_distribution_event_types = {
         "oekb_reported_distribution_10286",
-        "oekb_deemed_distribution_10287",
         "oekb_non_reported_distribution_10595",
     }
-    filing_income_df = income_events_df.filter(
-        pl.col("event_type").is_in(filing_event_types)
+    filing_distribution_income_df = income_events_df.filter(
+        pl.col("event_type").is_in(filing_distribution_event_types)
         | (
             (pl.col("event_type") == "broker_dividend_event")
             & pl.col("matched_broker_event_id").cast(pl.String).is_in(broker_cash_filing_event_ids)
         )
     )
-    filing_distribution_total_eur = filing_income_df["amount_total_eur"].sum() if filing_income_df.height else 0.0
+    filing_distribution_total_eur = (
+        filing_distribution_income_df["amount_total_eur"].sum() if filing_distribution_income_df.height else 0.0
+    )
+    filing_deemed_distribution_total_eur = (
+        income_events_df.filter(pl.col("event_type") == "oekb_deemed_distribution_10287")["amount_total_eur"].sum()
+        if income_events_df.height
+        else 0.0
+    )
     filing_creditable_foreign_tax_total_eur = (
         income_events_df.filter(pl.col("event_type") == "oekb_creditable_foreign_tax_10288")[
             "creditable_foreign_tax_total_eur"
@@ -1250,11 +1256,17 @@ def write_summary(
                 f"- `ETF distributions 27.5%`: `{filing_distribution_total_eur:.6f} EUR`"
             ),
             (
+                f"- `Ausschüttungsgleiche Erträge 27.5%`: `{filing_deemed_distribution_total_eur:.6f} EUR`"
+            ),
+            (
                 f"- `Creditable foreign tax`: `{filing_creditable_foreign_tax_total_eur:.6f} EUR`"
             ),
             (
-                "- includes `10286`, `10287`, `10595`, and only those broker cash payouts that remain the tax event "
-                "because no OeKB report period covered the pay date"
+                "- `ETF distributions 27.5%` includes `10286`, `10595`, and only those broker cash payouts that "
+                "remain the tax event because no OeKB report period covered the pay date"
+            ),
+            (
+                "- `Ausschüttungsgleiche Erträge 27.5%` is the subtotal of OeKB `10287` rows"
             ),
             (
                 "- accrual-only or realized-without-cash payout rows are deferred until broker cash is actually confirmed"

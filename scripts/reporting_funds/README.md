@@ -96,6 +96,15 @@ Run artifacts:
 - `data/output/<person>/reporting_funds/<year>/fund_tax_negative_deemed_distribution_review_<year>.csv`
 - `data/output/<person>/reporting_funds/<year>/reporting_funds_<year>_summary.md`
 
+The summary markdown now exposes filing-oriented ETF subtotals separately:
+
+- `ETF distributions 27.5%`
+  This is the subtotal of `10286`, `10595`, and only those broker cash payouts that remain the tax event because no OeKB report period covered the pay date.
+- `Ausschüttungsgleiche Erträge 27.5%`
+  This is the subtotal of OeKB `10287` rows.
+- `Creditable foreign tax`
+  This is the subtotal of OeKB `10288` rows.
+
 How these differ from the core stock path:
 
 - ETF sales still include `taxable_stepup_basis_eur` because OeKB basis adjustments are part of ETF sale basis

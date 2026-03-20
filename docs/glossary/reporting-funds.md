@@ -235,6 +235,34 @@ Columns:
 - `source_file`: OeKB file used for the review row
 - `notes`: reasoning, caveats, or override notes
 
+### `reporting_funds_<year>_summary.md`
+
+Purpose:
+
+- human-readable filing and audit summary for the ETF workflow
+
+Key sections:
+
+- `Filing Inputs`
+  ETF filing-oriented subtotals meant to help transfer the result into the tax form
+- `ETF Income Events`
+  detailed event rows that explain where the filing subtotals came from
+- `Basis Adjustments`
+  per-report `10289` basis deltas
+- `Ledger State`
+  end-of-run ETF lot state
+- `Sales`
+  ETF sale gain/loss total for the year
+
+Important filing lines:
+
+- `ETF distributions 27.5%`
+  subtotal of `10286`, `10595`, and only those broker cash payout rows that remain the tax event because no OeKB report period covered the pay date
+- `Ausschüttungsgleiche Erträge 27.5%`
+  subtotal of OeKB `10287` rows
+- `Creditable foreign tax`
+  subtotal of OeKB `10288` rows
+
 ## Reporting-Funds State Files
 
 ### `fund_tax_ledger_<year>_final.csv`

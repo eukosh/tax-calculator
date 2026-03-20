@@ -52,7 +52,7 @@ austrian_opening_lots_path: str | None = (
 )
 authoritative_start_date: date | None = date(2024, 5, 1) if person == "eugene" else None
 freedom_input_path = (
-    "data/input/oryna/freedom/ff_oryna_2024-12-31 23_59_59_2025-07-06 23_59_59_all.json"
+    "data/input/oryna/2025/ff_oryna_2024-12-31 23_59_59_2025-12-31 23_59_59_all.json"
     if person == "oryna"
     else "data/input/eugene/2025/freedom_2024-12-31 23_59_59_2025-12-31 23_59_59_all.json"
 )
@@ -60,6 +60,13 @@ freedom_input_path = (
 
 def _existing_path_or_none(file_path: str) -> str | None:
     return file_path if Path(file_path).exists() else None
+
+
+def _existing_first_or_none(*file_paths: str) -> str | None:
+    for file_path in file_paths:
+        if Path(file_path).exists():
+            return file_path
+    return None
 
 
 def _infer_ibkr_authoritative_rates_start_date(
@@ -94,7 +101,7 @@ if __name__ == "__main__":
     reporting_end_date = date(2025, 12, 31)
     ibkr_calculate_trade_profit_loss_separately = True
     freedom_calculate_trade_profit_loss_separately = True
-    include_freedom_trades = True
+    include_freedom_trades = False
 
     logging.info(f"Reporting dates: {reporting_start_date} - {reporting_end_date}")
 
@@ -226,7 +233,7 @@ if __name__ == "__main__":
 
     # ------- Revolut
     revolut_statement_paths = (
-        ["data/input/oryna/revolut/savings_statement_2025_01_01_2025_06_30.csv"]
+        ["data/input/oryna/2025/revolut_2025_01_01_2025_12_31_en_us_1980166307_449cac.csv"]
         if person == "oryna"
         else [
             "data/input/eugene/2025/revolut_2025-01-01_2025-12-31_en_eur.csv",
@@ -266,7 +273,10 @@ if __name__ == "__main__":
 
     # ------- Freedom Finance
     exclusion_file_path = f"data/input/{person}/freedom/dividend_entries_to_be_excluded_from_future_tax.csv"
-    dividend_type_mapping_file = f"data/input/{person}/freedom/dividend_type_mapping.csv"
+    dividend_type_mapping_file = _existing_first_or_none(
+        f"data/input/{person}/freedom/dividend_type_mapping.csv",
+        "data/input/freedom/dividend_type_mapping.csv",
+    )
     incorrect_withholding_tax_output_file = str(
         run_layout.artifact_path("freedom", "dividends_with_incorrect_non_0_withholding_tax.csv")
     )
@@ -277,7 +287,7 @@ if __name__ == "__main__":
         end_date=reporting_end_date,
         exclude_corporate_action_ids_file=_existing_path_or_none(exclusion_file_path),
         incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
-        dividend_type_mapping_file=_existing_path_or_none(dividend_type_mapping_file),
+        dividend_type_mapping_file=dividend_type_mapping_file,
         separate_trade_profit_loss=freedom_calculate_trade_profit_loss_separately,
         include_trades=include_freedom_trades,
     )
@@ -303,7 +313,7 @@ if __name__ == "__main__":
         end_date=reporting_end_date,
         exclude_corporate_action_ids_file=_existing_path_or_none(exclusion_file_path),
         incorrect_withholding_tax_output_file=incorrect_withholding_tax_output_file,
-        dividend_type_mapping_file=_existing_path_or_none(dividend_type_mapping_file),
+        dividend_type_mapping_file=dividend_type_mapping_file,
     )
     freedom_trade_buckets_df = build_finanzonline_buckets_from_summary_df(
         "freedom_trades",
