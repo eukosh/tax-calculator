@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import glob
 from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path
 from typing import Iterable
 
 import lxml.etree as etree
 import polars as pl
 
 from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
+from src.utils import resolve_input_file_paths
 
 MONEY_DIGITS = 6
 QTY_DIGITS = 8
@@ -221,12 +220,7 @@ def tax_lots_to_df(lots: Iterable[TaxLot], *, include_provenance: bool = True) -
 
 
 def _resolve_file_paths(file_path: str) -> list[str]:
-    path = Path(file_path)
-    if path.exists():
-        if path.is_dir():
-            return sorted(str(candidate) for candidate in path.glob("*.xml"))
-        return [str(path)]
-    return sorted(glob.glob(file_path))
+    return resolve_input_file_paths(file_path, suffix=".xml")
 
 
 def _parse_trade_datetime(row: etree._Element) -> datetime:

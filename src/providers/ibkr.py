@@ -3,7 +3,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Literal
+from typing import Literal, Sequence
 
 import polars as pl
 
@@ -132,7 +132,7 @@ def agg_final_transactions(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _build_cash_transactions_tax_df(
-    xml_file_path: str,
+    xml_file_path: str | Sequence[str],
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
@@ -141,6 +141,7 @@ def _build_cash_transactions_tax_df(
     cash_transactions_df = read_xml_to_df(
         file_path=xml_file_path,
         xml_extract_func=lambda root: extract_elements(root.find(".//CashTransactions"), "CashTransaction"),
+        dedupe=True,
     )
     if cash_transactions_df.is_empty():
         return None
@@ -207,7 +208,7 @@ def _build_cash_transactions_tax_df(
 
 
 def build_finanzonline_dividend_buckets_ibkr(
-    xml_file_path: str,
+    xml_file_path: str | Sequence[str],
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
@@ -248,7 +249,7 @@ def build_finanzonline_dividend_buckets_ibkr(
 
 
 def _load_closed_trade_lots_df(
-    xml_file_path: str,
+    xml_file_path: str | Sequence[str],
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
@@ -257,6 +258,7 @@ def _load_closed_trade_lots_df(
     trades_df = read_xml_to_df(
         file_path=xml_file_path,
         xml_extract_func=lambda root: extract_elements(root.find(".//Trades"), "Lot"),
+        dedupe=True,
     )
     if trades_df.is_empty():
         return pl.DataFrame()
@@ -559,7 +561,7 @@ def _reconcile_authoritative_sales(
 
 
 def _build_authoritative_sales_detail_df(
-    xml_file_path: str,
+    xml_file_path: str | Sequence[str],
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
@@ -734,7 +736,7 @@ def _build_trade_summary_df(
 
 
 def process_trades_ibkr(
-    xml_file_path: str,
+    xml_file_path: str | Sequence[str],
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
@@ -776,7 +778,7 @@ def process_trades_ibkr(
 
 
 def process_cash_transactions_ibkr(
-    xml_file_path: str,
+    xml_file_path: str | Sequence[str],
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
@@ -820,7 +822,7 @@ def process_cash_transactions_ibkr(
 
 
 def process_bonds_ibkr(
-    xml_file_path: str, exchange_rates_df: pl.DataFrame, start_date: date, end_date: date
+    xml_file_path: str | Sequence[str], exchange_rates_df: pl.DataFrame, start_date: date, end_date: date
 ) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
     """
     1. Load corporate actions from XML and select bond-tax-relevant columns.
@@ -836,6 +838,7 @@ def process_bonds_ibkr(
     corporate_actions_df = read_xml_to_df(
         file_path=xml_file_path,
         xml_extract_func=lambda root: extract_elements(root.find(".//CorporateActions"), "CorporateAction"),
+        dedupe=True,
     )
     if corporate_actions_df.is_empty():
         logging.warning("No Corporate Actions found in the XML file.")

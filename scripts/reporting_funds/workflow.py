@@ -324,8 +324,11 @@ def _sum_shares(lots: list[Lot]) -> float:
 
 
 def _ensure_lot_compatibility(lots: list[Lot], report: OekbReport) -> None:
-    if any(lot.currency != report.currency for lot in lots):
-        raise ValueError(f"OeKB currency {report.currency} does not match ledger lots for {report.ticker}")
+    # OeKB report currency can differ from the broker trade currency for the same ETF ISIN.
+    # Austrian ETF tax rows and basis corrections are converted to EUR from the OeKB report currency,
+    # while buy lots already store their basis in EUR. Therefore a currency mismatch between lot.trade
+    # currency and OeKB report currency is not, by itself, an incompatibility.
+    return None
 
 
 def apply_basis_correction(
@@ -658,14 +661,14 @@ def _resolve_annual_10595_reports(
                     "eligibility_date": payout.ex_date.isoformat() if payout.ex_date else payout.pay_date.isoformat(),
                     "ticker": payout.ticker,
                     "isin": payout.isin,
-                    "currency": report.currency,
+                    "currency": payout.currency,
                     "quantity": round_qty(payout.quantity),
                     "amount_per_share_ccy": round_money(
                         payout.broker_gross_amount_ccy / payout.quantity
                     ) if payout.quantity else 0.0,
                     "amount_total_ccy": round_money(payout.broker_gross_amount_ccy),
                     "amount_total_eur": round_money(
-                        payout.broker_gross_amount_ccy / get_fx_rate(fx_table, report.currency, payout.pay_date)
+                        payout.broker_gross_amount_ccy / get_fx_rate(fx_table, payout.currency, payout.pay_date)
                     ),
                     "creditable_foreign_tax_total_ccy": 0.0,
                     "creditable_foreign_tax_total_eur": 0.0,

@@ -128,6 +128,35 @@ def test_read_xml_to_df_param(tmp_path, files_info, wildcard_pattern, expected_d
     assert_frame_equal(df, expected_df)
 
 
+def test_read_xml_to_df_accepts_file_list(tmp_path):
+    first = tmp_path / "one.xml"
+    second = tmp_path / "two.xml"
+    first.write_text(XML_CONTENT_1)
+    second.write_text(XML_CONTENT_2)
+
+    df = read_xml_to_df([str(first), str(second)], lambda root: extract_elements(root, "record"))
+
+    expected_df = pl.DataFrame(
+        [
+            {"id": "1", "name": "test1", "value": "10"},
+            {"id": "2", "name": "test2", "value": "20"},
+        ]
+    )
+    assert_frame_equal(df, expected_df)
+
+
+def test_read_xml_to_df_accepts_directory_and_dedupes(tmp_path):
+    first = tmp_path / "one.xml"
+    second = tmp_path / "two.xml"
+    first.write_text(XML_CONTENT_1)
+    second.write_text(XML_CONTENT_1)
+
+    df = read_xml_to_df(str(tmp_path), lambda root: extract_elements(root, "record"), dedupe=True)
+
+    expected_df = pl.DataFrame([{"id": "1", "name": "test1", "value": "10"}])
+    assert_frame_equal(df, expected_df)
+
+
 @pytest.mark.parametrize(
     "dividend_date",
     [

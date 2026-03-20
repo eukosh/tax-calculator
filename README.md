@@ -66,6 +66,8 @@ Typical copy-edit-run flow:
 2. Adjust:
    - `person`
    - `ibkr_input_path`
+     - can be one XML file, a wildcard, a directory, or a Python list of XML files
+     - must cover the full filing year for dividends, withholding tax, bonds, and broker reconciliation
    - `ibkr_trade_history_path`
    - `austrian_opening_lots_path`
    - `authoritative_start_date`

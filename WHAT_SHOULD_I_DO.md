@@ -35,18 +35,29 @@ Do not use this part for reporting-fund ETFs. Those are handled separately below
 
 In IBKR Flex Queries, export:
 
-- one yearly tax XML for the filing year
+- tax XML coverage for the full filing year
 - full raw trade-history XML files for the account
 
 In practice you want:
 
-- `Tax_automation` style yearly tax XML with closed lots, cash transactions, etc.
+- `Tax_automation` style tax XML with closed lots, cash transactions, dividends, withholding tax, bonds, etc.
 - `Tax_automation_trades` style raw trade-history XML files with `TradeConfirm` rows
 
 Put them under:
 
 - yearly tax XML: `data/input/<person>/<year>/`
 - raw trade history: `data/input/<person>/ibkr/trades/`
+
+Important:
+
+- `ibkr_input_path` is used for dividends, withholding tax, bonds, and broker sale reconciliation
+- because of that, `ibkr_input_path` must cover the full filing year
+- this can be:
+  - one yearly XML file
+  - a wildcard matching several overlapping XML files
+  - a directory
+  - a Python list of XML files in `main.py`
+- if your IBKR exports are split into chunks, that is fine, but you must supply all relevant chunks
 
 ### Step 2: Special rule for Eugene
 
@@ -66,7 +77,7 @@ If you are `oryna` and all relevant buys are post-move, there should be no openi
 
 Open:
 
-- [`main.py`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/main.py)
+- [`main.py`](main.py)
 
 Set:
 
@@ -95,6 +106,7 @@ authoritative_start_date = None
 Important:
 
 - `ibkr_trade_history_path` is required
+- `ibkr_input_path` must include all IBKR tax XML files needed to cover the filing year for dividends/cash/bonds
 - `authoritative_start_date` only makes sense together with an opening-lot snapshot
 
 ### Step 4: Run the core app

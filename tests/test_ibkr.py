@@ -991,6 +991,151 @@ def test_core_ibkr_excludes_etfs_from_trades_cash_and_finanzonline_buckets(tmp_p
     assert trades_reconciliation_df is not None
 
 
+def test_process_cash_transactions_ibkr_dedupes_overlapping_xml_inputs(tmp_path):
+    xml_content = """\
+<FlexQueryResponse>
+  <FlexStatements count="1">
+    <FlexStatement>
+      <CashTransactions>
+        <CashTransaction
+          accountId="U1"
+          currency="USD"
+          assetCategory="STK"
+          subCategory="COMMON"
+          symbol="AAPL"
+          issuerCountryCode="US"
+          dateTime="2024-10-01 20:20:00"
+          settleDate="2024-10-01"
+          amount="10.0"
+          type="Dividends"
+          actionID="div-1"
+        />
+        <CashTransaction
+          accountId="U1"
+          currency="USD"
+          assetCategory="STK"
+          subCategory="COMMON"
+          symbol="AAPL"
+          issuerCountryCode="US"
+          dateTime="2024-10-01 20:20:00"
+          settleDate="2024-10-01"
+          amount="-1.5"
+          type="Withholding Tax"
+          actionID="div-1"
+        />
+      </CashTransactions>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    first_xml = tmp_path / "ibkr_a.xml"
+    second_xml = tmp_path / "ibkr_b.xml"
+    first_xml.write_text(xml_content, encoding="utf-8")
+    second_xml.write_text(xml_content, encoding="utf-8")
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 10, 1)],
+            Column.currency: ["USD"],
+            Column.exchange_rate: [1.0],
+        }
+    )
+
+    country_agg_df, etf_df = process_cash_transactions_ibkr(
+        xml_file_path=[str(first_xml), str(second_xml)],
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+    )
+
+    expected_df = pl.DataFrame(
+        {
+            "issuer_country_code": ["US"],
+            Column.currency: ["USD"],
+            Column.profit_total: [10.0],
+            Column.dividends_euro_total: [10.0],
+            Column.dividends_euro_net_total: [7.25],
+            "withholding_tax_euro_total": [1.5],
+            "kest_gross_total": [2.75],
+            "kest_net_total": [1.25],
+        }
+    )
+
+    assert etf_df is None
+    assert_frame_equal(country_agg_df, expected_df)
+
+
+def test_process_trades_ibkr_dedupes_overlapping_closed_lot_xml_inputs(tmp_path):
+    trade_history_path = tmp_path / "history.xml"
+    _write_trade_history_xml(
+        trade_history_path,
+        [
+            _trade_confirm_row(
+                ticker="AAPL",
+                isin="US0378331005",
+                sub_category="COMMON",
+                trade_date="2024-01-02",
+                date_time="2024-01-02 10:00:00",
+                operation="BUY",
+                quantity="1",
+                price="100",
+                trade_id="buy-1",
+            ),
+            _trade_confirm_row(
+                ticker="AAPL",
+                isin="US0378331005",
+                sub_category="COMMON",
+                trade_date="2024-06-03",
+                date_time="2024-06-03 10:00:00",
+                operation="SELL",
+                quantity="-1",
+                price="120",
+                trade_id="sell-1",
+            ),
+        ],
+    )
+    first_closed_lot_path = tmp_path / "closed_a.xml"
+    second_closed_lot_path = tmp_path / "closed_b.xml"
+    lot_rows = [
+        _closed_lot_row(
+            ticker="AAPL",
+            isin="US0378331005",
+            sub_category="COMMON",
+            sale_date="2024-06-03",
+            sale_datetime="2024-06-03 10:00:00",
+            buy_datetime="2024-01-02 10:00:00",
+            quantity="1",
+            cost="100",
+            pnl="20",
+            sale_trade_id="broker-sell-1",
+        )
+    ]
+    _write_closed_lot_xml(first_closed_lot_path, lot_rows)
+    _write_closed_lot_xml(second_closed_lot_path, lot_rows)
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 1, 2), date(2024, 6, 3)],
+            Column.currency: ["USD", "USD"],
+            Column.exchange_rate: [1.0, 1.0],
+        }
+    )
+
+    detail_df, _, _, trades_reconciliation_df = process_trades_ibkr(
+        xml_file_path=[str(first_closed_lot_path), str(second_closed_lot_path)],
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        ibkr_trade_history_path=str(trade_history_path),
+    )
+
+    assert detail_df is not None
+    assert detail_df.height == 1
+    assert trades_reconciliation_df is not None
+    assert trades_reconciliation_df.height == 1
+    assert trades_reconciliation_df["sale_aggregate_status"].to_list() == ["matched"]
+
+
 def _write_opening_lots_csv(path: Path, rows: list[dict[str, object]]) -> None:
     header = (
         "snapshot_date,asset_class,ticker,isin,lot_id,buy_date,original_quantity,remaining_quantity,"

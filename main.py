@@ -23,8 +23,8 @@ from src.providers.ibkr import (
     process_trades_ibkr,
 )
 from src.providers.revolut import process_revolut_savings_statement
-from src.tax_lots import load_ibkr_stock_like_trades, load_opening_tax_lots
 from src.providers.wise import process_wise_statement
+from src.tax_lots import load_ibkr_stock_like_trades, load_opening_tax_lots
 from src.utils import has_rows
 from src.writer import ReportRunLayout
 
@@ -34,12 +34,23 @@ logging.basicConfig(
 )
 
 
-# person = "oryna"
-person = "eugene"
-ibkr_input_path = "data/input/eugene/2025/ibkr_20250101_20260101.xml"
-ibkr_trade_history_path: str | None = "data/input/eugene/ibkr/trades/*.xml"
-austrian_opening_lots_path: str | None = "data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv"
-authoritative_start_date: date | None = date(2024, 5, 1)
+person = "oryna"
+# person = "eugene"
+# IBKR tax XML input can be:
+# - one XML file
+# - a wildcard string
+# - a directory
+# - a list of any of the above
+ibkr_input_path = [
+    "data/input/oryna/2024/ibkr_20241120_20251120.xml",
+    "data/input/oryna/2025/ibkr_20251118_20260318.xml",
+]
+
+ibkr_trade_history_path: str | None = "data/input/oryna/ibkr/trades/*.xml"
+austrian_opening_lots_path: str | None = (
+    "data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv" if person == "eugene" else None
+)
+authoritative_start_date: date | None = date(2024, 5, 1) if person == "eugene" else None
 freedom_input_path = (
     "data/input/oryna/freedom/ff_oryna_2024-12-31 23_59_59_2025-07-06 23_59_59_all.json"
     if person == "oryna"
@@ -74,6 +85,7 @@ def _infer_ibkr_authoritative_rates_start_date(
             candidate_dates.append(min(trade.trade_date for trade in raw_trades))
 
     return min(candidate_dates) if candidate_dates else None
+
 
 if __name__ == "__main__":
     pl.Config.set_tbl_rows(100)
@@ -177,7 +189,9 @@ if __name__ == "__main__":
                 "reconciliation_notes",
             ]
             ibkr_writer.write_csv(
-                trades_reconciliation_df.select([col for col in reconciliation_cols if col in trades_reconciliation_df.columns]),
+                trades_reconciliation_df.select(
+                    [col for col in reconciliation_cols if col in trades_reconciliation_df.columns]
+                ),
                 "trades_reconciliation.csv",
             )
     if stock_lot_state_df is not None:
@@ -198,8 +212,17 @@ if __name__ == "__main__":
     ]
 
     summary_ibkr_df = calculate_summary_ibkr(sections=summary_sections)
-    ibkr_writer.write_csv(summary_ibkr_df, "ibkr_summary.csv")
-    report_sections.append(ReportSection("IBKR", summary_ibkr_df))
+    if has_rows(summary_ibkr_df):
+        ibkr_writer.write_csv(summary_ibkr_df, "ibkr_summary.csv")
+        report_sections.append(ReportSection("IBKR", summary_ibkr_df))
+    else:
+        logging.info("Skipping IBKR section in final report because IBKR summary is empty.")
+        stale_ibkr_summary_path = (
+            ibkr_writer.output_dir / f"ibkr_summary__{reporting_start_date.isoformat()}_{reporting_end_date.isoformat()}.csv"
+        )
+        if stale_ibkr_summary_path.exists():
+            stale_ibkr_summary_path.unlink()
+            logging.info("Removed stale empty IBKR summary artifact at %s", stale_ibkr_summary_path)
 
     # ------- Revolut
     revolut_statement_paths = (

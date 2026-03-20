@@ -174,9 +174,10 @@ def _trade_row(
     quantity: str,
     price: str,
     transaction_id: str,
+    currency: str = "USD",
 ) -> str:
     return (
-        f"<Trade accountId=\"U1\" symbol=\"{ticker}\" isin=\"{isin}\" subCategory=\"ETF\" currency=\"USD\" "
+        f"<Trade accountId=\"U1\" symbol=\"{ticker}\" isin=\"{isin}\" subCategory=\"ETF\" currency=\"{currency}\" "
         f"tradeDate=\"{trade_date}\" dateTime=\"{date_time}\" buySell=\"{operation}\" quantity=\"{quantity}\" "
         f"tradePrice=\"{price}\" transactionID=\"{transaction_id}\" />"
     )
@@ -733,6 +734,111 @@ def test_reporting_funds_workflow_historical_lock_bootstrap_ignores_pre_2025_ref
     historical_row = payout_state_df.filter(pl.col("payout_key") == "vusd-2024")
     assert historical_row["status"].to_list() == ["ignored_prior_year_reference"]
     assert "ignored for current-year tax and basis" in historical_row["notes"].to_list()[0]
+
+
+def test_reporting_funds_allows_eur_trade_currency_with_usd_oekb_report(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2024-12-20", "USD", 1.0),
+            ("2025-03-20", "USD", 1.0),
+            ("2025-04-02", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="VWRL",
+                isin="IE00B3RBWM25",
+                trade_date="2024-12-20",
+                date_time="2024-12-20 08:09:15",
+                operation="BUY",
+                quantity="3",
+                price="130.56",
+                transaction_id="buy-vwrl-1",
+                currency="EUR",
+            )
+        ],
+    )
+
+    tax_dir = tmp_path / "tax"
+    tax_dir.mkdir(parents=True, exist_ok=True)
+    _write_tax_xml(
+        tax_dir / "2025.xml",
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="VWRL",
+                isin="IE00B3RBWM25",
+                settle_date="2025-04-02",
+                ex_date="2025-03-20",
+                amount="1.39",
+                action_id="vwrl-2025-q1",
+                report_date="2025-04-03",
+            )
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="VWRL",
+                isin="IE00B3RBWM25",
+                report_date="2025-03-20",
+                effective_date="2025-03-19",
+                ex_date="2025-03-20",
+                pay_date="2025-04-02",
+                quantity="3",
+                code="Po",
+                action_id="vwrl-2025-q1",
+                gross_rate="0.46446",
+                gross_amount="1.39",
+            ),
+            _accrual_row(
+                ticker="VWRL",
+                isin="IE00B3RBWM25",
+                report_date="2025-04-03",
+                effective_date="2025-04-02",
+                ex_date="2025-03-20",
+                pay_date="2025-04-02",
+                quantity="3",
+                code="Re",
+                action_id="vwrl-2025-q1",
+                gross_rate="0.46446",
+                gross_amount="-1.39",
+            ),
+        ],
+    )
+
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2025" / "vwrl_q1.csv",
+        isin="IE00B3RBWM25",
+        meldedatum="01.04.2025",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="02.04.2025",
+        ex_tag="20.03.2025",
+        value_10286="0,46446",
+        currency="USD",
+    )
+
+    output_paths = run_workflow(
+        person="oryna",
+        tax_year=2025,
+        ibkr_tax_xml_path=tax_dir,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+        strict_unresolved_payouts=False,
+    )
+
+    income_df = pl.read_csv(output_paths["income_events"])
+    ledger_df = pl.read_csv(output_paths["ledger"])
+
+    assert income_df.filter(pl.col("ticker") == "VWRL").height > 0
+    assert ledger_df.filter(pl.col("ticker") == "VWRL")["currency"].to_list() == ["EUR"]
 
 
 def test_reporting_funds_carryforward_only_skips_pre_move_in_2024_activity(tmp_path: Path) -> None:

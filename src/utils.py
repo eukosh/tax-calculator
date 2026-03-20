@@ -1,6 +1,7 @@
 import glob
 import json
 import logging
+from pathlib import Path
 from typing import Callable, Sequence, TypeGuard, Union
 
 import lxml.etree as etree
@@ -31,18 +32,47 @@ def read_json(path: str) -> dict:
     return json_data
 
 
-def read_xml_to_df(file_path: str, xml_extract_func: Callable[[etree._Element], list[dict]]) -> pl.DataFrame:
+def resolve_input_file_paths(file_path: Union[str, Sequence[str]], *, suffix: str | None = None) -> list[str]:
+    raw_paths = [file_path] if isinstance(file_path, str) else list(file_path)
+    resolved_paths: list[str] = []
+    seen: set[str] = set()
+
+    for raw_path in raw_paths:
+        path = Path(raw_path)
+        if path.exists():
+            if path.is_dir():
+                pattern = f"*{suffix}" if suffix else "*"
+                candidates = sorted(str(candidate) for candidate in path.glob(pattern))
+            else:
+                candidates = [str(path)]
+        else:
+            candidates = sorted(glob.glob(raw_path))
+
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            resolved_paths.append(candidate)
+
+    return resolved_paths
+
+
+def read_xml_to_df(
+    file_path: Union[str, Sequence[str]],
+    xml_extract_func: Callable[[etree._Element], list[dict]],
+    *,
+    dedupe: bool = False,
+) -> pl.DataFrame:
     """
     Reads XML files into a Polars DataFrame. Supports reading multiple files matching a wildcard pattern.
 
     Args:
-        file_path (str): Path to the XML file or a wildcard pattern (e.g., 'folder/File*').
+        file_path: Path to an XML file, a wildcard pattern, a directory, or a list of those.
 
     Returns:
         pl.DataFrame: Combined DataFrame containing data from all matched XML files.
     """
-    # Find all matching files using the wildcard
-    file_paths = glob.glob(file_path)
+    file_paths = resolve_input_file_paths(file_path, suffix=".xml")
 
     if not file_paths:
         raise FileNotFoundError(f"No files matched the pattern: {file_path}")
@@ -60,21 +90,24 @@ def read_xml_to_df(file_path: str, xml_extract_func: Callable[[etree._Element], 
         except Exception as e:
             raise ValueError(f"Failed to read XML file at {path}: {e}")
 
-    return pl.concat(dfs, how="vertical")
+    if not dfs:
+        return pl.DataFrame()
+
+    combined_df = pl.concat(dfs, how="vertical")
+    return combined_df.unique(maintain_order=True) if dedupe else combined_df
 
 
-def read_csv_to_df(file_path: str) -> pl.DataFrame:
+def read_csv_to_df(file_path: Union[str, Sequence[str]]) -> pl.DataFrame:
     """
     Reads CSV files into a Polars DataFrame. Supports reading multiple files matching a wildcard pattern.
 
     Args:
-        file_path (str): Path to the CSV file or a wildcard pattern (e.g., 'folder/File*').
+        file_path: Path to a CSV file, a wildcard pattern, a directory, or a list of those.
 
     Returns:
         pl.DataFrame: Combined DataFrame containing data from all matched CSV files.
     """
-    # Find all matching files using the wildcard
-    file_paths = glob.glob(file_path)
+    file_paths = resolve_input_file_paths(file_path, suffix=".csv")
 
     if not file_paths:
         raise FileNotFoundError(f"No files matched the pattern: {file_path}")
