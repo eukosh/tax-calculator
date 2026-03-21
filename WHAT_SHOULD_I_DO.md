@@ -226,6 +226,7 @@ poetry run python -m scripts.reporting_funds.cli \
   --oekb-root-dir data/input/oekb \
   --opening-lots-path data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv \
   --authoritative-start-date 2024-05-01 \
+  --resolution-cutoff-date 2024-12-31 \
   --carryforward-only
 ```
 

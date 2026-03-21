@@ -133,7 +133,7 @@ Bootstrap / carryforward-only run:
 poetry run python -m scripts.reporting_funds.cli \
   --person eugene \
   --tax-year 2024 \
-  --ibkr-tax-xml-path data/input/eugene/2024/ibkr_20250101_20241231.xml \
+  --ibkr-tax-xml-path data/input/eugene/2024/ibkr_20240101_20241231.xml \
   --ibkr-trade-history-path data/input/eugene/ibkr/trades \
   --oekb-root-dir data/input/oekb \
   --opening-lots-path data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv \

@@ -34,19 +34,20 @@ logging.basicConfig(
 )
 
 
-person = "oryna"
-# person = "eugene"
+# person = "oryna"
+person = "eugene"
 # IBKR tax XML input can be:
 # - one XML file
 # - a wildcard string
 # - a directory
 # - a list of any of the above
 ibkr_input_path = [
-    "data/input/oryna/2024/ibkr_20241120_20251120.xml",
-    "data/input/oryna/2025/ibkr_20251118_20260318.xml",
+    # "data/input/oryna/2024/ibkr_20241120_20251120.xml",
+    # "data/input/oryna/2025/ibkr_20251118_20260318.xml",
+    "data/input/eugene/2025/ibkr_20250101_20260101.xml"
 ]
 
-ibkr_trade_history_path: str | None = "data/input/oryna/ibkr/trades/*.xml"
+ibkr_trade_history_path: str | None = f"data/input/{person}/ibkr/trades/*.xml"
 austrian_opening_lots_path: str | None = (
     "data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv" if person == "eugene" else None
 )
@@ -225,7 +226,8 @@ if __name__ == "__main__":
     else:
         logging.info("Skipping IBKR section in final report because IBKR summary is empty.")
         stale_ibkr_summary_path = (
-            ibkr_writer.output_dir / f"ibkr_summary__{reporting_start_date.isoformat()}_{reporting_end_date.isoformat()}.csv"
+            ibkr_writer.output_dir
+            / f"ibkr_summary__{reporting_start_date.isoformat()}_{reporting_end_date.isoformat()}.csv"
         )
         if stale_ibkr_summary_path.exists():
             stale_ibkr_summary_path.unlink()
@@ -274,7 +276,6 @@ if __name__ == "__main__":
     # ------- Freedom Finance
     exclusion_file_path = f"data/input/{person}/freedom/dividend_entries_to_be_excluded_from_future_tax.csv"
     dividend_type_mapping_file = _existing_first_or_none(
-        f"data/input/{person}/freedom/dividend_type_mapping.csv",
         "data/input/freedom/dividend_type_mapping.csv",
     )
     incorrect_withholding_tax_output_file = str(
