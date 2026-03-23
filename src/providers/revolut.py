@@ -5,6 +5,7 @@ from typing import Final
 import polars as pl
 
 from src.const import FLOAT_PRECISION, Column, CurrencyCode, RevolutColumn, RevolutType
+from src.precision import cast_decimal_columns_to_float
 from src.utils import calculate_kest, convert_to_euro, join_exchange_rates
 
 _IGNORED_PREFIXES: Final[tuple[str, ...]] = (
@@ -182,4 +183,4 @@ def process_revolut_savings_statement(
 
     logging.info(summary_df)
 
-    return summary_df
+    return cast_decimal_columns_to_float(summary_df)

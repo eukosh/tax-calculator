@@ -5,6 +5,7 @@ import pytest
 from polars.testing.asserts import assert_frame_equal
 
 from src.const import Column
+from src.precision import cast_decimal_columns_to_float
 from src.utils import calculate_kest, convert_to_euro, extract_elements, join_exchange_rates, read_xml_to_df
 
 dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 6), date(2024, 1, 10), date(2024, 1, 10)]
@@ -79,7 +80,7 @@ def test_calculate_kest(dividends_euro_df, expected_df, tax_withheld_col):
     # Perform the calculation
     result = calculate_kest(dividends_euro_df, amount_col=Column.profit_euro, tax_withheld_col=tax_withheld_col)
 
-    assert_frame_equal(expected_df, result)
+    assert_frame_equal(expected_df, cast_decimal_columns_to_float(result))
 
 
 def test_calculate_kest_clips_negative_amounts_to_zero_tax():
@@ -104,7 +105,7 @@ def test_calculate_kest_clips_negative_amounts_to_zero_tax():
         }
     )
 
-    assert_frame_equal(expected, result)
+    assert_frame_equal(expected, cast_decimal_columns_to_float(result))
 
 
 XML_CONTENT_1 = """\
@@ -286,4 +287,4 @@ def test_convert_to_euro(col_to_convert, converted_cols: dict):
     )
     res_df = convert_to_euro(df, col_to_convert)
 
-    assert_frame_equal(expected_df, res_df)
+    assert_frame_equal(expected_df, cast_decimal_columns_to_float(res_df))

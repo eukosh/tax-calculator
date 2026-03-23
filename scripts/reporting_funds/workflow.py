@@ -3,6 +3,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections import defaultdict
 from copy import deepcopy
+from decimal import Decimal
 from datetime import date, datetime
 from itertools import combinations
 from pathlib import Path
@@ -41,6 +42,7 @@ from src.moving_average import (
     position_states_to_df,
     replay_events,
 )
+from src.precision import cast_decimal_columns_to_float, quantize_fx, quantize_money, quantize_qty, to_decimal, to_output_float
 
 NEGATIVE_DEEMED_DISTRIBUTION_IGNORE = "ignore"
 NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL = "apply_full"
@@ -58,7 +60,7 @@ def build_fx_table(
     end_date: date,
     raw_exchange_rates_path: str | Path,
     currencies: tuple[str, ...],
-) -> dict[str, tuple[list[date], list[float]]]:
+) -> dict[str, tuple[list[date], list[Decimal]]]:
     raw_exchange_rates_path = Path(raw_exchange_rates_path)
     overwrite_rates_cache = raw_exchange_rates_path == Path("data/input/currencies/raw_exchange_rates.csv")
     exchange_rates = ExchangeRates(
@@ -70,16 +72,19 @@ def build_fx_table(
     )
 
     rates_df = exchange_rates.get_rates()
-    fx_table: dict[str, tuple[list[date], list[float]]] = {}
+    fx_table: dict[str, tuple[list[date], list[Decimal]]] = {}
     for currency in sorted(set(rates_df["currency"].to_list())):
         currency_df = rates_df.filter(pl.col("currency") == currency).sort("rate_date")
-        fx_table[currency] = (currency_df["rate_date"].to_list(), currency_df["exchange_rate"].to_list())
+        fx_table[currency] = (
+            currency_df["rate_date"].to_list(),
+            [quantize_fx(value) for value in currency_df["exchange_rate"].to_list()],
+        )
     return fx_table
 
 
-def get_fx_rate(fx_table: dict[str, tuple[list[date], list[float]]], currency: str, event_date: date) -> float:
+def get_fx_rate(fx_table: dict[str, tuple[list[date], list[Decimal]]], currency: str, event_date: date) -> Decimal:
     if currency == "EUR":
-        return 1.0
+        return Decimal("1")
 
     if currency not in fx_table:
         raise ValueError(f"Missing FX series for currency {currency}")
@@ -96,7 +101,7 @@ def get_fx_rate(fx_table: dict[str, tuple[list[date], list[float]]], currency: s
             f"(>{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET} days)"
         )
 
-    return float(available_rates[index])
+    return quantize_fx(available_rates[index])
 
 
 def load_state(path: str | Path) -> list[PositionState]:
@@ -142,11 +147,11 @@ def load_payout_state(path: str | Path) -> dict[str, PayoutStateRow]:
             isin=str(row["isin"]),
             ex_date=date.fromisoformat(str(row["ex_date"])) if row.get("ex_date") else None,
             pay_date=date.fromisoformat(str(row["pay_date"])),
-            quantity=round_qty(float(row["quantity"])),
+            quantity=round_qty(to_decimal(row["quantity"])),
             currency=str(row["currency"]),
-            broker_gross_amount_ccy=round_money(float(row.get("broker_gross_amount_ccy") or 0.0)),
-            broker_net_amount_ccy=round_money(float(row.get("broker_net_amount_ccy") or 0.0)),
-            broker_tax_amount_ccy=round_money(float(row.get("broker_tax_amount_ccy") or 0.0)),
+            broker_gross_amount_ccy=round_money(to_decimal(row.get("broker_gross_amount_ccy") or 0)),
+            broker_net_amount_ccy=round_money(to_decimal(row.get("broker_net_amount_ccy") or 0)),
+            broker_tax_amount_ccy=round_money(to_decimal(row.get("broker_tax_amount_ccy") or 0)),
             source_tax_year=int(row["source_tax_year"]),
             evidence_state=str(row.get("evidence_state") or PAYOUT_EVIDENCE_CONFIRMED_CASH),
             status=str(row["status"]),
@@ -187,7 +192,7 @@ def payout_state_to_df(rows: list[PayoutStateRow]) -> pl.DataFrame:
     }
     if not rows:
         return pl.DataFrame(schema=schema)
-    return pl.DataFrame([row.to_record() for row in rows]).sort(["ticker", "pay_date", "payout_key"])
+    return cast_decimal_columns_to_float(pl.DataFrame([row.to_record() for row in rows])).sort(["ticker", "pay_date", "payout_key"])
 
 
 def prepare_positions_for_new_year(positions: list[PositionState]) -> list[PositionState]:
@@ -213,7 +218,7 @@ def _apply_position_event(
 def apply_trade(
     positions: list[PositionState],
     trade: IbkrTrade,
-    fx_table: dict[str, tuple[list[date], list[float]]],
+    fx_table: dict[str, tuple[list[date], list[Decimal]]],
     sale_rows: list[dict[str, object]] | None = None,
     *,
     event_rows: list[dict[str, object]] | None = None,
@@ -259,7 +264,7 @@ def _eligible_positions(positions: list[PositionState], isin: str, eligibility_d
     return [position for position in positions if position.isin == isin and position.quantity > 0]
 
 
-def _sum_shares(positions: list[PositionState]) -> float:
+def _sum_shares(positions: list[PositionState]) -> Decimal:
     return round_qty(sum(position.quantity for position in positions))
 
 
@@ -276,9 +281,9 @@ def apply_basis_correction(
     positions: list[PositionState],
     report: OekbReport,
     tax_year: int,
-    fx_table: dict[str, tuple[list[date], list[float]]],
+    fx_table: dict[str, tuple[list[date], list[Decimal]]],
     *,
-    quantity_override: float | None = None,
+    quantity_override: Decimal | None = None,
     note_prefix: str = "",
     event_rows: list[dict[str, object]] | None = None,
     sequence_key_start: int = 0,
@@ -296,21 +301,21 @@ def apply_basis_correction(
     basis_stepup_total_ccy = round_money(report.acquisition_cost_correction_per_share_ccy * shares_held)
     basis_stepup_total_eur = round_money(basis_stepup_total_ccy / fx_to_eur)
 
-    allocated_total = 0.0
+    allocated_total = Decimal("0")
     for index, position in enumerate(eligible_positions):
         if shares_held == 0 or not eligible_positions:
-            stepup_eur = 0.0
+            stepup_eur = Decimal("0")
         elif index == len(eligible_positions) - 1:
             stepup_eur = round_money(basis_stepup_total_eur - allocated_total)
         else:
             total_remaining_quantity = _sum_shares(eligible_positions)
             if total_remaining_quantity == 0:
-                stepup_eur = 0.0
+                stepup_eur = Decimal("0")
             else:
                 stepup_eur = round_money(basis_stepup_total_eur * (position.quantity / total_remaining_quantity))
             allocated_total += stepup_eur
 
-        if stepup_eur != 0.0:
+        if stepup_eur != 0:
             event = build_basis_adjustment_event(
                 broker=position.broker,
                 ticker=position.ticker,
@@ -325,7 +330,7 @@ def apply_basis_correction(
                 source_file=report.source_file,
                 notes=(
                     f"{note_prefix}{tax_year} OeKB basis correction on {effective_date.isoformat()} "
-                    f"(eligible {eligibility_date.isoformat()}, delta {stepup_eur:.6f} EUR)"
+                    f"(eligible {eligibility_date.isoformat()}, delta {to_output_float(stepup_eur):.6f} EUR)"
                 ),
                 sequence_key=sequence_key_start + index,
             )
@@ -339,11 +344,11 @@ def apply_basis_correction(
         "eligibility_date": eligibility_date.isoformat(),
         "effective_date": effective_date.isoformat(),
         "currency": report.currency,
-        "acquisition_cost_correction_per_share_ccy": round_money(report.acquisition_cost_correction_per_share_ccy),
-        "shares_held_on_eligibility_date": shares_held,
-        "basis_stepup_total_ccy": basis_stepup_total_ccy,
-        "basis_stepup_total_eur": basis_stepup_total_eur,
-        "fx_to_eur": round_money(fx_to_eur),
+        "acquisition_cost_correction_per_share_ccy": to_output_float(round_money(report.acquisition_cost_correction_per_share_ccy)),
+        "shares_held_on_eligibility_date": to_output_float(shares_held),
+        "basis_stepup_total_ccy": to_output_float(basis_stepup_total_ccy),
+        "basis_stepup_total_eur": to_output_float(basis_stepup_total_eur),
+        "fx_to_eur": to_output_float(round_money(fx_to_eur)),
         "source_file": report.source_file,
         "notes": (
             (f"{note_prefix.strip()} " if note_prefix else "")
@@ -522,14 +527,14 @@ def _resolve_annual_10595_reports(
     *,
     target_tax_year: int,
     positions_for_quantity: list[PositionState],
-    fx_table: dict[str, tuple[list[date], list[float]]],
+    fx_table: dict[str, tuple[list[date], list[Decimal]]],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     del positions_for_quantity
     income_rows: list[dict[str, object]] = []
     resolution_rows: list[dict[str, object]] = []
 
     for report in annual_reports:
-        if report.non_reported_distribution_per_share_ccy == 0.0:
+        if report.non_reported_distribution_per_share_ccy == 0:
             continue
         period = report.annual_reconciliation_period
         if period is None:
@@ -619,21 +624,21 @@ def _resolve_annual_10595_reports(
                     "ticker": payout.ticker,
                     "isin": payout.isin,
                     "currency": payout.currency,
-                    "quantity": round_qty(payout.quantity),
-                    "amount_per_share_ccy": round_money(
+                    "quantity": to_output_float(round_qty(payout.quantity)),
+                    "amount_per_share_ccy": to_output_float(round_money(
                         payout.broker_gross_amount_ccy / payout.quantity
-                    ) if payout.quantity else 0.0,
-                    "amount_total_ccy": round_money(payout.broker_gross_amount_ccy),
-                    "amount_total_eur": round_money(
+                    )) if payout.quantity else 0.0,
+                    "amount_total_ccy": to_output_float(round_money(payout.broker_gross_amount_ccy)),
+                    "amount_total_eur": to_output_float(round_money(
                         payout.broker_gross_amount_ccy / get_fx_rate(fx_table, payout.currency, payout.pay_date)
-                    ),
+                    )),
                     "creditable_foreign_tax_total_ccy": 0.0,
                     "creditable_foreign_tax_total_eur": 0.0,
                     "domestic_dividend_kest_total_ccy": 0.0,
                     "domestic_dividend_kest_total_eur": 0.0,
-                    "broker_gross_amount_ccy": round_money(payout.broker_gross_amount_ccy),
-                    "broker_net_amount_ccy": round_money(payout.broker_net_amount_ccy),
-                    "broker_tax_amount_ccy": round_money(payout.broker_tax_amount_ccy),
+                    "broker_gross_amount_ccy": to_output_float(round_money(payout.broker_gross_amount_ccy)),
+                    "broker_net_amount_ccy": to_output_float(round_money(payout.broker_net_amount_ccy)),
+                    "broker_tax_amount_ccy": to_output_float(round_money(payout.broker_tax_amount_ccy)),
                     "matched_broker_event_id": payout.payout_key,
                     "source_file": report.source_file,
                     "notes": (
@@ -703,13 +708,13 @@ def _resolve_broker_cash_payouts_outside_annual_periods(
     return resolution_rows
 
 
-def _build_broker_dividend_row(event: BrokerDividendEvent, fx_table: dict[str, tuple[list[date], list[float]]]) -> dict[str, object]:
+def _build_broker_dividend_row(event: BrokerDividendEvent, fx_table: dict[str, tuple[list[date], list[Decimal]]]) -> dict[str, object]:
     fx_to_eur = get_fx_rate(fx_table, event.currency, event.pay_date)
-    gross_amount_ccy = round_money(event.gross_amount or 0.0)
-    net_amount_ccy = round_money(event.net_amount or 0.0)
-    tax_ccy = round_money(event.tax or 0.0)
+    gross_amount_ccy = round_money(event.gross_amount or 0)
+    net_amount_ccy = round_money(event.net_amount or 0)
+    tax_ccy = round_money(event.tax or 0)
     notes = f"Collapsed broker accrual lifecycle has_po={event.has_po} has_re={event.has_re}; {event.matching_notes}".strip("; ")
-    if tax_ccy != 0.0:
+    if tax_ccy != 0:
         notes = (
             f"{notes}; broker withholding retained as audit-only evidence; "
             "OeKB annual report determines ETF creditable foreign tax"
@@ -722,17 +727,17 @@ def _build_broker_dividend_row(event: BrokerDividendEvent, fx_table: dict[str, t
         "ticker": event.ticker,
         "isin": event.isin,
         "currency": event.currency,
-        "quantity": round_qty(event.quantity),
-        "amount_per_share_ccy": round_money(event.gross_rate or 0.0),
-        "amount_total_ccy": gross_amount_ccy,
-        "amount_total_eur": round_money(gross_amount_ccy / fx_to_eur),
+        "quantity": to_output_float(round_qty(event.quantity)),
+        "amount_per_share_ccy": to_output_float(round_money(event.gross_rate or 0)),
+        "amount_total_ccy": to_output_float(gross_amount_ccy),
+        "amount_total_eur": to_output_float(round_money(gross_amount_ccy / fx_to_eur)),
         "creditable_foreign_tax_total_ccy": 0.0,
         "creditable_foreign_tax_total_eur": 0.0,
         "domestic_dividend_kest_total_ccy": 0.0,
         "domestic_dividend_kest_total_eur": 0.0,
-        "broker_gross_amount_ccy": gross_amount_ccy,
-        "broker_net_amount_ccy": net_amount_ccy,
-        "broker_tax_amount_ccy": tax_ccy,
+        "broker_gross_amount_ccy": to_output_float(gross_amount_ccy),
+        "broker_net_amount_ccy": to_output_float(net_amount_ccy),
+        "broker_tax_amount_ccy": to_output_float(tax_ccy),
         "matched_broker_event_id": event.event_id,
         "source_file": event.source_statement_file,
         "notes": notes,
@@ -792,10 +797,10 @@ def build_income_rows_for_report(
     positions: list[PositionState],
     report: OekbReport,
     tax_year: int,
-    fx_table: dict[str, tuple[list[date], list[float]]],
+    fx_table: dict[str, tuple[list[date], list[Decimal]]],
     broker_events: list[BrokerDividendEvent],
     *,
-    quantity_override: float | None = None,
+    quantity_override: Decimal | None = None,
     note_prefix: str = "",
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
@@ -806,12 +811,12 @@ def build_income_rows_for_report(
         event_type: str,
         event_date: date,
         eligibility_date: date,
-        quantity: float,
-        amount_per_share_ccy: float,
-        amount_total_ccy: float,
-        creditable_foreign_tax_per_share_ccy: float = 0.0,
-        creditable_foreign_tax_total_ccy: float = 0.0,
-        domestic_dividend_kest_total_ccy: float = 0.0,
+        quantity: Decimal,
+        amount_per_share_ccy: Decimal,
+        amount_total_ccy: Decimal,
+        creditable_foreign_tax_per_share_ccy: Decimal = Decimal("0"),
+        creditable_foreign_tax_total_ccy: Decimal = Decimal("0"),
+        domestic_dividend_kest_total_ccy: Decimal = Decimal("0"),
         matched_broker_event_id: str = "",
         notes: str = "",
     ) -> None:
@@ -825,14 +830,14 @@ def build_income_rows_for_report(
                 "ticker": report.ticker,
                 "isin": report.isin,
                 "currency": report.currency,
-                "quantity": round_qty(quantity),
-                "amount_per_share_ccy": round_money(amount_per_share_ccy),
-                "amount_total_ccy": round_money(amount_total_ccy),
-                "amount_total_eur": round_money(amount_total_ccy / fx_to_eur),
-                "creditable_foreign_tax_total_ccy": round_money(creditable_foreign_tax_total_ccy),
-                "creditable_foreign_tax_total_eur": round_money(creditable_foreign_tax_total_ccy / fx_to_eur),
-                "domestic_dividend_kest_total_ccy": round_money(domestic_dividend_kest_total_ccy),
-                "domestic_dividend_kest_total_eur": round_money(domestic_dividend_kest_total_ccy / fx_to_eur),
+                "quantity": to_output_float(round_qty(quantity)),
+                "amount_per_share_ccy": to_output_float(round_money(amount_per_share_ccy)),
+                "amount_total_ccy": to_output_float(round_money(amount_total_ccy)),
+                "amount_total_eur": to_output_float(round_money(amount_total_ccy / fx_to_eur)),
+                "creditable_foreign_tax_total_ccy": to_output_float(round_money(creditable_foreign_tax_total_ccy)),
+                "creditable_foreign_tax_total_eur": to_output_float(round_money(creditable_foreign_tax_total_ccy / fx_to_eur)),
+                "domestic_dividend_kest_total_ccy": to_output_float(round_money(domestic_dividend_kest_total_ccy)),
+                "domestic_dividend_kest_total_eur": to_output_float(round_money(domestic_dividend_kest_total_ccy / fx_to_eur)),
                 "broker_gross_amount_ccy": 0.0,
                 "broker_net_amount_ccy": 0.0,
                 "broker_tax_amount_ccy": 0.0,
@@ -853,7 +858,7 @@ def build_income_rows_for_report(
 
         return report.meldedatum, report.meldedatum, ""
 
-    if report.reported_distribution_per_share_ccy != 0.0:
+    if report.reported_distribution_per_share_ccy != 0:
         event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
         eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
         _ensure_position_compatibility(eligible_positions, report)
@@ -869,7 +874,7 @@ def build_income_rows_for_report(
             notes="Explicit OeKB distribution matched to broker dividend accrual event.",
         )
 
-    if report.age_per_share_ccy != 0.0:
+    if report.age_per_share_ccy != 0:
         event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
         eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
         _ensure_position_compatibility(eligible_positions, report)
@@ -889,7 +894,7 @@ def build_income_rows_for_report(
             ).strip(),
         )
 
-    if report.creditable_foreign_tax_per_share_ccy != 0.0:
+    if report.creditable_foreign_tax_per_share_ccy != 0:
         event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
         eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
         _ensure_position_compatibility(eligible_positions, report)
@@ -900,8 +905,8 @@ def build_income_rows_for_report(
             event_date=event_date,
             eligibility_date=eligibility_date,
             quantity=quantity,
-            amount_per_share_ccy=0.0,
-            amount_total_ccy=0.0,
+            amount_per_share_ccy=Decimal("0"),
+            amount_total_ccy=Decimal("0"),
             creditable_foreign_tax_per_share_ccy=report.creditable_foreign_tax_per_share_ccy,
             creditable_foreign_tax_total_ccy=credit_total_ccy,
             matched_broker_event_id=matched_broker_event_id,
@@ -912,7 +917,7 @@ def build_income_rows_for_report(
             ).strip(),
         )
 
-    if report.domestic_dividends_loss_offset_per_share_ccy != 0.0:
+    if report.domestic_dividends_loss_offset_per_share_ccy != 0:
         event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
         eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
         _ensure_position_compatibility(eligible_positions, report)
@@ -932,7 +937,7 @@ def build_income_rows_for_report(
             ).strip(),
         )
 
-    if report.domestic_dividend_kest_per_share_ccy != 0.0:
+    if report.domestic_dividend_kest_per_share_ccy != 0:
         event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
         eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
         _ensure_position_compatibility(eligible_positions, report)
@@ -943,8 +948,8 @@ def build_income_rows_for_report(
             event_date=event_date,
             eligibility_date=eligibility_date,
             quantity=quantity,
-            amount_per_share_ccy=0.0,
-            amount_total_ccy=0.0,
+            amount_per_share_ccy=Decimal("0"),
+            amount_total_ccy=Decimal("0"),
             domestic_dividend_kest_total_ccy=domestic_kest_total_ccy,
             matched_broker_event_id=matched_broker_event_id,
             notes=(
@@ -980,7 +985,7 @@ def basis_adjustments_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
     }
     if not rows:
         return pl.DataFrame(schema=schema)
-    return pl.DataFrame(rows).sort(["ticker", "tax_year", "effective_date", "report_type"])
+    return cast_decimal_columns_to_float(pl.DataFrame(rows)).sort(["ticker", "tax_year", "effective_date", "report_type"])
 
 
 def income_events_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
@@ -1009,7 +1014,7 @@ def income_events_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
     }
     if not rows:
         return pl.DataFrame(schema=schema)
-    return pl.DataFrame(rows).sort(["ticker", "tax_year", "event_date", "event_type"])
+    return cast_decimal_columns_to_float(pl.DataFrame(rows)).sort(["ticker", "tax_year", "event_date", "event_type"])
 
 
 def payout_resolution_events_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
@@ -1025,7 +1030,7 @@ def payout_resolution_events_to_df(rows: list[dict[str, object]]) -> pl.DataFram
     }
     if not rows:
         return pl.DataFrame(schema=schema)
-    return pl.DataFrame(rows).sort(["ticker", "pay_date", "resolution_mode"])
+    return cast_decimal_columns_to_float(pl.DataFrame(rows)).sort(["ticker", "pay_date", "resolution_mode"])
 
 
 def negative_deemed_distribution_review_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
@@ -1055,7 +1060,7 @@ def negative_deemed_distribution_review_to_df(rows: list[dict[str, object]]) -> 
     }
     if not rows:
         return pl.DataFrame(schema=schema)
-    return pl.DataFrame(rows).sort(["ticker", "report_date"])
+    return cast_decimal_columns_to_float(pl.DataFrame(rows)).sort(["ticker", "report_date"])
 
 
 def payout_evidence_review_to_df(rows: list[PayoutStateRow], tax_year: int) -> pl.DataFrame:
@@ -1083,13 +1088,13 @@ def payout_evidence_review_to_df(rows: list[PayoutStateRow], tax_year: int) -> p
             "isin": payout.isin,
             "ex_date": payout.ex_date.isoformat() if payout.ex_date else "",
             "pay_date": payout.pay_date.isoformat(),
-            "quantity": round_qty(payout.quantity),
+            "quantity": to_output_float(round_qty(payout.quantity)),
             "currency": payout.currency,
             "evidence_state": payout.evidence_state,
             "status": payout.status,
-            "broker_gross_amount_ccy": round_money(payout.broker_gross_amount_ccy),
-            "broker_net_amount_ccy": round_money(payout.broker_net_amount_ccy),
-            "broker_tax_amount_ccy": round_money(payout.broker_tax_amount_ccy),
+            "broker_gross_amount_ccy": to_output_float(round_money(payout.broker_gross_amount_ccy)),
+            "broker_net_amount_ccy": to_output_float(round_money(payout.broker_net_amount_ccy)),
+            "broker_tax_amount_ccy": to_output_float(round_money(payout.broker_tax_amount_ccy)),
             "action_id": payout.action_id,
             "source_statement_file": payout.source_statement_file,
             "notes": payout.notes,
@@ -1100,7 +1105,7 @@ def payout_evidence_review_to_df(rows: list[PayoutStateRow], tax_year: int) -> p
     ]
     if not review_rows:
         return pl.DataFrame(schema=schema)
-    return pl.DataFrame(review_rows).sort(["ticker", "pay_date", "payout_key"])
+    return cast_decimal_columns_to_float(pl.DataFrame(review_rows)).sort(["ticker", "pay_date", "payout_key"])
 
 
 def position_event_log_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
@@ -1125,7 +1130,7 @@ def sales_to_df(sale_rows: list[dict[str, object]]) -> pl.DataFrame:
     }
     if not sale_rows:
         return pl.DataFrame(schema=schema)
-    return pl.DataFrame(sale_rows).sort(["ticker", "sale_date", "sale_trade_id"])
+    return cast_decimal_columns_to_float(pl.DataFrame(sale_rows)).sort(["ticker", "sale_date", "sale_trade_id"])
 
 
 def write_csv(df: pl.DataFrame, output_path: Path) -> None:
@@ -1413,7 +1418,7 @@ def _determine_required_isins(
         previous_open_isins = {position.isin for position in previous_positions if position.quantity > 0}
         return current_year_trades | previous_open_isins
 
-    quantity_by_isin: dict[str, float] = defaultdict(float)
+    quantity_by_isin: dict[str, Decimal] = defaultdict(Decimal)
     for trade in all_trades:
         if trade.trade_date.year > tax_year:
             continue
@@ -1510,21 +1515,21 @@ def _candidate_negative_report_payouts(report: OekbReport, broker_events: list[B
     return [event for event in same_isin_events if period_start <= event.pay_date <= period_end]
 
 
-def _negative_report_target_distribution_per_share(report: OekbReport) -> float | None:
+def _negative_report_target_distribution_per_share(report: OekbReport) -> Decimal | None:
     for value in (
         report.non_reported_distribution_per_share_ccy,
         report.basis_distribution_component_per_share_ccy,
         report.total_distributions_per_share_ccy,
     ):
-        if value is not None and value > 0.0:
+        if value is not None and value > 0:
             return round_money(value)
     return None
 
 
-def _broker_event_distribution_per_share(event: BrokerDividendEvent) -> float | None:
-    if event.gross_rate is not None and event.gross_rate > 0.0:
+def _broker_event_distribution_per_share(event: BrokerDividendEvent) -> Decimal | None:
+    if event.gross_rate is not None and event.gross_rate > 0:
         return round_money(event.gross_rate)
-    if event.gross_amount is not None and event.quantity > 0.0:
+    if event.gross_amount is not None and event.quantity > 0:
         return round_money(event.gross_amount / event.quantity)
     return None
 
@@ -1533,13 +1538,13 @@ def _reconcile_negative_report_payout_subset(
     report: OekbReport,
     candidate_payouts: list[BrokerDividendEvent],
     *,
-    tolerance: float = 0.0002,
-) -> tuple[list[BrokerDividendEvent], float | None]:
+    tolerance: Decimal = Decimal("0.0002"),
+) -> tuple[list[BrokerDividendEvent], Decimal | None]:
     target_per_share = _negative_report_target_distribution_per_share(report)
     if target_per_share is None or not candidate_payouts:
         return [], target_per_share
 
-    payout_rates: list[tuple[BrokerDividendEvent, float]] = []
+    payout_rates: list[tuple[BrokerDividendEvent, Decimal]] = []
     for event in candidate_payouts:
         rate = _broker_event_distribution_per_share(event)
         if rate is None:
@@ -1558,11 +1563,11 @@ def _reconcile_negative_report_payout_subset(
     return matching_subsets[0], target_per_share
 
 
-def _parse_override_quantity(raw_value: str, report_key: str) -> float | None:
+def _parse_override_quantity(raw_value: str, report_key: str) -> Decimal | None:
     if not raw_value:
         return None
     try:
-        return round_qty(float(raw_value))
+        return round_qty(Decimal(raw_value))
     except ValueError as exc:
         raise ValueError(f"Invalid eligible_quantity override for negative deemed-distribution report {report_key}.") from exc
 
@@ -1582,7 +1587,7 @@ def _resolve_negative_deemed_distribution_review(
 
     decision = NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
     status = NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
-    eligible_quantity_used = 0.0
+    eligible_quantity_used = Decimal("0")
     notes = ""
 
     auto_apply_payouts = matched_payouts
@@ -1595,7 +1600,7 @@ def _resolve_negative_deemed_distribution_review(
         if eligible_quantity_used > 0:
             decision = (
                 NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL
-                if abs(eligible_quantity_used - quantity_held_on_report_date) <= 1e-8
+                if abs(eligible_quantity_used - quantity_held_on_report_date) <= Decimal("0.00000001")
                 else NEGATIVE_DEEMED_DISTRIBUTION_APPLY_PARTIAL
             )
             status = NEGATIVE_DEEMED_DISTRIBUTION_APPLIED_AUTO
@@ -1632,7 +1637,7 @@ def _resolve_negative_deemed_distribution_review(
             decision = NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
             status = NEGATIVE_DEEMED_DISTRIBUTION_BLOCK
 
-        if eligible_quantity_used < 0 or eligible_quantity_used - quantity_held_on_report_date > 1e-8:
+        if eligible_quantity_used < 0 or eligible_quantity_used - quantity_held_on_report_date > Decimal("0.00000001"):
             raise ValueError(
                 f"Negative deemed-distribution override for {report_key} uses eligible_quantity={eligible_quantity_used}, "
                 f"which exceeds the quantity held on the report date ({quantity_held_on_report_date})."
@@ -1645,36 +1650,36 @@ def _resolve_negative_deemed_distribution_review(
         "report_date": report.meldedatum.isoformat(),
         "decision": decision,
         "status": status,
-        "eligible_quantity_used": round_qty(eligible_quantity_used),
-        "quantity_held_on_report_date": round_qty(quantity_held_on_report_date),
+        "eligible_quantity_used": to_output_float(round_qty(eligible_quantity_used)),
+        "quantity_held_on_report_date": to_output_float(round_qty(quantity_held_on_report_date)),
         "candidate_payout_count": len(candidate_payouts),
         "candidate_payout_dates": "|".join(event.pay_date.isoformat() for event in candidate_payouts),
-        "candidate_payout_quantities": "|".join(str(round_qty(event.quantity)) for event in candidate_payouts),
+        "candidate_payout_quantities": "|".join(str(to_output_float(round_qty(event.quantity))) for event in candidate_payouts),
         "candidate_payout_gross_rates_ccy": "|".join(
             str(round_money(rate))
             for rate in (_broker_event_distribution_per_share(event) for event in candidate_payouts)
             if rate is not None
         ),
-        "candidate_payout_gross_amounts_ccy": "|".join(str(round_money(event.gross_amount or 0.0)) for event in candidate_payouts),
+        "candidate_payout_gross_amounts_ccy": "|".join(str(to_output_float(round_money(event.gross_amount or 0))) for event in candidate_payouts),
         "matched_payout_count": len(auto_apply_payouts),
         "matched_payout_dates": "|".join(event.pay_date.isoformat() for event in auto_apply_payouts),
-        "matched_payout_quantities": "|".join(str(round_qty(event.quantity)) for event in auto_apply_payouts),
+        "matched_payout_quantities": "|".join(str(to_output_float(round_qty(event.quantity))) for event in auto_apply_payouts),
         "matched_payout_gross_rates_ccy": "|".join(
             str(round_money(rate))
             for rate in (_broker_event_distribution_per_share(event) for event in auto_apply_payouts)
             if rate is not None
         ),
-        "target_distribution_per_share_ccy": round_money(target_distribution_per_share or 0.0),
-        "deemed_distributed_income_per_share_ccy": round_money(report.age_per_share_ccy),
-        "non_reported_distribution_per_share_ccy": round_money(report.non_reported_distribution_per_share_ccy),
-        "creditable_foreign_tax_per_share_ccy": round_money(report.creditable_foreign_tax_per_share_ccy),
-        "basis_correction_per_share_ccy": round_money(report.acquisition_cost_correction_per_share_ccy),
-        "basis_age_component_per_share_ccy": round_money(report.basis_age_component_per_share_ccy or 0.0),
-        "basis_distribution_component_per_share_ccy": round_money(report.basis_distribution_component_per_share_ccy or 0.0),
-        "capital_repayment_per_share_ccy": round_money(report.capital_repayment_per_share_ccy or 0.0),
-        "withheld_tax_on_non_reported_distributions_per_share_ccy": round_money(
-            report.withheld_tax_on_non_reported_distributions_per_share_ccy or 0.0
-        ),
+        "target_distribution_per_share_ccy": to_output_float(round_money(target_distribution_per_share or 0)),
+        "deemed_distributed_income_per_share_ccy": to_output_float(round_money(report.age_per_share_ccy)),
+        "non_reported_distribution_per_share_ccy": to_output_float(round_money(report.non_reported_distribution_per_share_ccy)),
+        "creditable_foreign_tax_per_share_ccy": to_output_float(round_money(report.creditable_foreign_tax_per_share_ccy)),
+        "basis_correction_per_share_ccy": to_output_float(round_money(report.acquisition_cost_correction_per_share_ccy)),
+        "basis_age_component_per_share_ccy": to_output_float(round_money(report.basis_age_component_per_share_ccy or 0)),
+        "basis_distribution_component_per_share_ccy": to_output_float(round_money(report.basis_distribution_component_per_share_ccy or 0)),
+        "capital_repayment_per_share_ccy": to_output_float(round_money(report.capital_repayment_per_share_ccy or 0)),
+        "withheld_tax_on_non_reported_distributions_per_share_ccy": to_output_float(round_money(
+            report.withheld_tax_on_non_reported_distributions_per_share_ccy or 0
+        )),
         "source_file": report.source_file,
         "notes": notes,
     }
@@ -1908,7 +1913,7 @@ def run_workflow(
         if isinstance(payload, OekbReport):
             if payload.is_ausschuettungsmeldung and not _has_confirmed_distribution_match(payload, current_year_confirmed_broker_events):
                 continue
-            if payload.age_per_share_ccy < 0.0:
+            if payload.age_per_share_ccy < 0:
                 review_row = _resolve_negative_deemed_distribution_review(
                     payload,
                     working_positions,
@@ -1918,7 +1923,7 @@ def run_workflow(
                 negative_review_rows.append(review_row)
                 report_key = str(review_row["report_key"])
                 decision = str(review_row["decision"])
-                eligible_quantity_used = float(review_row["eligible_quantity_used"])
+                eligible_quantity_used = quantize_qty(review_row["eligible_quantity_used"])
 
                 if decision == NEGATIVE_DEEMED_DISTRIBUTION_IGNORE:
                     skipped_negative_report_keys.add(report_key)

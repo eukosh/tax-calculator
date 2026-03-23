@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import date
 from pathlib import Path
 
@@ -290,15 +291,15 @@ def test_load_oekb_report_parses_distribution_and_annual_fields(tmp_path: Path) 
     assert idtl.is_ausschuettungsmeldung is True
     assert idtl.ex_tag == date(2025, 12, 11)
     assert idtl.ausschuettungstag == date(2025, 12, 24)
-    assert idtl.acquisition_cost_correction_per_share_ccy == -0.0735
-    assert idtl.domestic_dividends_loss_offset_per_share_ccy == 0.0016
-    assert idtl.domestic_dividend_kest_per_share_ccy == 0.0004
+    assert idtl.acquisition_cost_correction_per_share_ccy == Decimal("-0.073500")
+    assert idtl.domestic_dividends_loss_offset_per_share_ccy == Decimal("0.001600")
+    assert idtl.domestic_dividend_kest_per_share_ccy == Decimal("0.000400")
 
     assert spy5.is_jahresmeldung is True
-    assert spy5.non_reported_distribution_per_share_ccy == 6.373
-    assert spy5.creditable_foreign_tax_per_share_ccy == 0.9271
-    assert spy5.domestic_dividends_loss_offset_per_share_ccy == 0.0
-    assert spy5.domestic_dividend_kest_per_share_ccy == 0.0
+    assert spy5.non_reported_distribution_per_share_ccy == Decimal("6.373000")
+    assert spy5.creditable_foreign_tax_per_share_ccy == Decimal("0.927100")
+    assert spy5.domestic_dividends_loss_offset_per_share_ccy == Decimal("0")
+    assert spy5.domestic_dividend_kest_per_share_ccy == Decimal("0")
 
 
 def test_load_required_oekb_reports_supports_multiple_files_per_isin_and_isin_matching(tmp_path: Path) -> None:
@@ -381,12 +382,12 @@ def test_load_oekb_report_prefers_private_investor_section_in_full_export(tmp_pa
 
     assert report.ticker == "SPY5"
     assert report.reported_distribution_per_share_ccy == 0.0
-    assert report.age_per_share_ccy == 11.2278
-    assert report.non_reported_distribution_per_share_ccy == 6.373
-    assert report.creditable_foreign_tax_per_share_ccy == 0.9271
-    assert report.acquisition_cost_correction_per_share_ccy == 10.1944
-    assert report.domestic_dividends_loss_offset_per_share_ccy == 0.1234
-    assert report.domestic_dividend_kest_per_share_ccy == 0.0123
+    assert report.age_per_share_ccy == Decimal("11.227800")
+    assert report.non_reported_distribution_per_share_ccy == Decimal("6.373000")
+    assert report.creditable_foreign_tax_per_share_ccy == Decimal("0.927100")
+    assert report.acquisition_cost_correction_per_share_ccy == Decimal("10.194400")
+    assert report.domestic_dividends_loss_offset_per_share_ccy == Decimal("0.123400")
+    assert report.domestic_dividend_kest_per_share_ccy == Decimal("0.012300")
 
 
 def test_load_required_oekb_reports_missing_file_message_includes_ticker_and_isin(tmp_path: Path) -> None:
@@ -513,7 +514,7 @@ def test_build_broker_dividend_events_matches_cash_by_action_id_and_ignores_symb
 
     assert len(events) == 1
     assert events[0].ticker == "IDTL"
-    assert events[0].gross_amount == 40.43
+    assert events[0].gross_amount == Decimal("40.430000")
     assert events[0].evidence_state == "confirmed_cash"
     assert "symbol drift ignored" in events[0].matching_notes
 

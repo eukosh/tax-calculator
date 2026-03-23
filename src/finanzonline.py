@@ -1,10 +1,12 @@
 from collections.abc import Mapping
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 import polars as pl
 
 from src.const import FLOAT_PRECISION, KEST_RATE
 from src.const import Column as Col
+from src.precision import cast_decimal_columns_to_float, to_decimal, to_output_float
 
 INPUT_LABEL_COL = "Field"
 ESTIMATE_LABEL_COL = "Metric"
@@ -56,20 +58,20 @@ def empty_finanzonline_bucket_df() -> pl.DataFrame:
 
 
 def _round_amount(value: float) -> float:
-    return round(float(value), FLOAT_PRECISION)
+    return to_output_float(to_decimal(value).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
 
 
-def _get_float(row: Mapping[str, Any], key: str) -> float:
-    return float(row.get(key, 0.0) or 0.0)
+def _get_decimal(row: Mapping[str, Any], key: str) -> Decimal:
+    return to_decimal(row.get(key, 0))
 
 
-def _sum_df_column(df: pl.DataFrame, column_name: str) -> float:
+def _sum_df_column(df: pl.DataFrame, column_name: str) -> Decimal:
     if df.is_empty():
-        return 0.0
-    return float(df.select(pl.col(column_name).sum()).item(0, 0) or 0.0)
+        return Decimal("0")
+    return to_decimal(df.select(pl.col(column_name).sum()).item(0, 0) or 0)
 
 
-def _coarse_bucket_category(row_type: str, amount_eur: float) -> str:
+def _coarse_bucket_category(row_type: str, amount_eur: Decimal) -> str:
     if row_type in {"", "dividends"}:
         return ORDINARY_INCOME_BUCKET_CATEGORY
     if row_type == "ETF div":
@@ -93,7 +95,7 @@ def build_finanzonline_buckets_from_summary_df(source: str, summary_df: pl.DataF
     has_type_col = Col.type.value in summary_df.columns
 
     for index, row in enumerate(summary_df.to_dicts()):
-        amount_eur = _get_float(row, Col.profit_euro_total.value)
+        amount_eur = _get_decimal(row, Col.profit_euro_total.value)
         row_type = str(row.get(Col.type.value, "")) if has_type_col else ""
         bucket_rows.append(
             {
@@ -101,12 +103,14 @@ def build_finanzonline_buckets_from_summary_df(source: str, summary_df: pl.DataF
                 BUCKET_LABEL_COL: f"{source}:{row_type or 'summary'}:{index}",
                 BUCKET_CATEGORY_COL: _coarse_bucket_category(row_type, amount_eur),
                 BUCKET_AMOUNT_EUR_COL: amount_eur,
-                BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL: _get_float(row, Col.withholding_tax_euro_total.value),
+                BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL: to_output_float(_get_decimal(row, Col.withholding_tax_euro_total.value)),
                 # Creditable foreign tax = Austrian KESt reduction from foreign withholding,
                 # i.e. kest_gross (KESt on gross amount) minus kest_net (KESt after treaty credit).
-                BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL: max(
-                    _get_float(row, Col.kest_gross_total.value) - _get_float(row, Col.kest_net_total.value),
-                    0.0,
+                BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL: to_output_float(
+                    max(
+                        _get_decimal(row, Col.kest_gross_total.value) - _get_decimal(row, Col.kest_net_total.value),
+                        Decimal("0"),
+                    )
                 ),
             }
         )
@@ -125,26 +129,26 @@ def build_finanzonline_buckets_from_provider_summaries(
     return pl.concat(bucket_frames, how="vertical_relaxed") if bucket_frames else empty_finanzonline_bucket_df()
 
 
-def _sum_bucket_amount_by_category(buckets_df: pl.DataFrame, category: str) -> float:
+def _sum_bucket_amount_by_category(buckets_df: pl.DataFrame, category: str) -> Decimal:
     return _sum_df_column(
         buckets_df.filter(pl.col(BUCKET_CATEGORY_COL) == category),
         BUCKET_AMOUNT_EUR_COL,
     )
 
 
-def _get_total_positive_income(buckets_df: pl.DataFrame) -> float:
+def _get_total_positive_income(buckets_df: pl.DataFrame) -> Decimal:
     return _sum_df_column(buckets_df.filter(pl.col(BUCKET_AMOUNT_EUR_COL) > 0), BUCKET_AMOUNT_EUR_COL)
 
 
-def _get_total_offset_losses(buckets_df: pl.DataFrame) -> float:
+def _get_total_offset_losses(buckets_df: pl.DataFrame) -> Decimal:
     gross_losses = -_sum_df_column(buckets_df.filter(pl.col(BUCKET_AMOUNT_EUR_COL) < 0), BUCKET_AMOUNT_EUR_COL)
     return min(gross_losses, _get_total_positive_income(buckets_df))
 
 
-def _calculate_creditable_foreign_tax_after_loss_favorable(buckets_df: pl.DataFrame) -> float:
+def _calculate_creditable_foreign_tax_after_loss_favorable(buckets_df: pl.DataFrame) -> Decimal:
     positive_df = buckets_df.filter(pl.col(BUCKET_AMOUNT_EUR_COL) > 0)
     if positive_df.is_empty():
-        return 0.0
+        return Decimal("0")
 
     remaining_loss = _get_total_offset_losses(buckets_df)
     if remaining_loss <= 0:
@@ -161,10 +165,10 @@ def _calculate_creditable_foreign_tax_after_loss_favorable(buckets_df: pl.DataFr
         .to_dicts()
     )
 
-    creditable_foreign_tax = 0.0
+    creditable_foreign_tax = Decimal("0")
     for row in allocation_rows:
-        bucket_amount = _get_float(row, BUCKET_AMOUNT_EUR_COL)
-        bucket_credit = _get_float(row, BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL)
+        bucket_amount = _get_decimal(row, BUCKET_AMOUNT_EUR_COL)
+        bucket_credit = _get_decimal(row, BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL)
         if bucket_amount <= 0:
             continue
 
@@ -177,21 +181,21 @@ def _calculate_creditable_foreign_tax_after_loss_favorable(buckets_df: pl.DataFr
     return creditable_foreign_tax
 
 
-def _calculate_creditable_foreign_tax_after_loss_proportional(buckets_df: pl.DataFrame) -> float:
+def _calculate_creditable_foreign_tax_after_loss_proportional(buckets_df: pl.DataFrame) -> Decimal:
     total_positive_income = _get_total_positive_income(buckets_df)
     if total_positive_income <= 0:
-        return 0.0
+        return Decimal("0")
 
     total_pre_loss_credit = _sum_df_column(
         buckets_df.filter(pl.col(BUCKET_AMOUNT_EUR_COL) > 0),
         BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL,
     )
     total_offset_losses = _get_total_offset_losses(buckets_df)
-    post_loss_ratio = max(total_positive_income - total_offset_losses, 0.0) / total_positive_income
+    post_loss_ratio = max(total_positive_income - total_offset_losses, Decimal("0")) / total_positive_income
     return total_pre_loss_credit * post_loss_ratio
 
 
-def _calculate_creditable_foreign_tax_after_loss(buckets_df: pl.DataFrame, loss_offset_method: str) -> float:
+def _calculate_creditable_foreign_tax_after_loss(buckets_df: pl.DataFrame, loss_offset_method: str) -> Decimal:
     if loss_offset_method == LOSS_OFFSET_METHOD_FAVORABLE:
         return _calculate_creditable_foreign_tax_after_loss_favorable(buckets_df)
     if loss_offset_method == LOSS_OFFSET_METHOD_PROPORTIONAL:
@@ -219,8 +223,8 @@ def build_finanzonline_report(
     )
     creditable_foreign_tax = _calculate_creditable_foreign_tax_after_loss(buckets_df, loss_offset_method)
 
-    estimated_base = max(_sum_df_column(buckets_df, BUCKET_AMOUNT_EUR_COL), 0.0)
-    estimated_tax = max(estimated_base * KEST_RATE - creditable_foreign_tax, 0.0)
+    estimated_base = max(_sum_df_column(buckets_df, BUCKET_AMOUNT_EUR_COL), Decimal("0"))
+    estimated_tax = max(estimated_base * Decimal(str(KEST_RATE)) - creditable_foreign_tax, Decimal("0"))
 
     inputs_df = pl.DataFrame(
         {
@@ -260,4 +264,4 @@ def build_finanzonline_report(
         }
     )
 
-    return inputs_df, estimate_df
+    return cast_decimal_columns_to_float(inputs_df), cast_decimal_columns_to_float(estimate_df)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from datetime import date, datetime
 from pathlib import Path
 
 from scripts.reporting_funds.models import OekbReport, round_money
+from src.precision import quantize_qty
 
 REQUIRED_METADATA_LABELS = (
     "ISIN",
@@ -16,9 +18,12 @@ REQUIRED_CODE_VALUES = ("10286", "10287", "10595", "10288", "10289")
 PRIVATE_INVESTOR_SECTION_TITLE = "Kennzahlen ESt-Erklärung Privatanleger (je Anteil)"
 
 
-def _parse_decimal(value: str) -> float:
+def _parse_decimal(value: str) -> Decimal:
     normalized = value.strip().replace(".", "").replace(",", ".")
-    return float(normalized)
+    try:
+        return Decimal(normalized)
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid decimal literal: {value!r}") from exc
 
 
 def _parse_date(value: str) -> date:
@@ -79,7 +84,7 @@ def _find_section_rows(lines: list[list[str]], section_title: str) -> list[list[
     return []
 
 
-def _find_numeric_value_by_code_in_rows(rows: list[list[str]], code: str) -> float | None:
+def _find_numeric_value_by_code_in_rows(rows: list[list[str]], code: str) -> Decimal | None:
     for row in rows:
         if len(row) < 5 or row[-1].strip() != code:
             continue
@@ -93,7 +98,7 @@ def _find_numeric_value_by_code_in_rows(rows: list[list[str]], code: str) -> flo
     return None
 
 
-def _find_numeric_value_by_code(lines: list[list[str]], code: str) -> float:
+def _find_numeric_value_by_code(lines: list[list[str]], code: str) -> Decimal:
     private_investor_rows = _find_section_rows(lines, PRIVATE_INVESTOR_SECTION_TITLE)
     private_investor_value = _find_numeric_value_by_code_in_rows(private_investor_rows, code)
     if private_investor_value is not None:
@@ -105,7 +110,7 @@ def _find_numeric_value_by_code(lines: list[list[str]], code: str) -> float:
     raise ValueError(f"Missing OeKB code {code}")
 
 
-def _find_optional_numeric_value_by_code(lines: list[list[str]], code: str) -> float | None:
+def _find_optional_numeric_value_by_code(lines: list[list[str]], code: str) -> Decimal | None:
     for row in lines:
         if len(row) < 5 or row[-1].strip() != code:
             continue
@@ -156,13 +161,13 @@ def load_oekb_report(path: str | Path, tax_year: int | None = None, ticker_by_is
         acquisition_cost_correction_per_share_ccy=_find_numeric_value_by_code(lines, "10289"),
         source_file=str(report_path),
         domestic_dividends_loss_offset_per_share_ccy=(
-            _find_optional_numeric_value_by_code(lines, "10759") or 0.0
+            _find_optional_numeric_value_by_code(lines, "10759") or Decimal("0")
         ),
         domestic_dividend_kest_per_share_ccy=(
-            _find_optional_numeric_value_by_code(lines, "10760") or 0.0
+            _find_optional_numeric_value_by_code(lines, "10760") or Decimal("0")
         ),
         total_shares_at_inflow=(
-            round_money(_parse_decimal(_find_optional_value(lines, "Anzahl Anteile zum Zuflusszeitpunkt")))
+            quantize_qty(_parse_decimal(_find_optional_value(lines, "Anzahl Anteile zum Zuflusszeitpunkt")))
             if _find_optional_value(lines, "Anzahl Anteile zum Zuflusszeitpunkt")
             else None
         ),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
+from decimal import Decimal
 from datetime import date, datetime
 from typing import Iterable
 
@@ -9,6 +10,7 @@ import lxml.etree as etree
 import polars as pl
 
 from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
+from src.precision import quantize_fx, quantize_money, quantize_qty, to_decimal
 from src.utils import resolve_input_file_paths
 
 MONEY_DIGITS = 6
@@ -16,12 +18,12 @@ QTY_DIGITS = 8
 RAW_IBKR_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-def round_money(value: float) -> float:
-    return round(float(value), MONEY_DIGITS)
+def round_money(value: float | Decimal) -> Decimal:
+    return quantize_money(value)
 
 
-def round_qty(value: float) -> float:
-    return round(float(value), QTY_DIGITS)
+def round_qty(value: float | Decimal) -> Decimal:
+    return quantize_qty(value)
 
 
 @dataclass(frozen=True)
@@ -31,15 +33,15 @@ class RawBrokerTrade:
     trade_date: date
     trade_datetime: datetime
     operation: str
-    quantity: float
-    price_ccy: float
+    quantity: Decimal
+    price_ccy: Decimal
     currency: str
     trade_id: str
     account_id: str = ""
     source_statement_file: str = ""
     asset_class: str = ""
-    net_cash_ccy: float | None = None
-    fee_ccy: float = 0.0
+    net_cash_ccy: Decimal | None = None
+    fee_ccy: Decimal = Decimal("0")
 
 
 def _resolve_file_paths(file_path: str) -> list[str]:
@@ -116,36 +118,36 @@ def load_ibkr_stock_like_trades(
                             trade_date=trade_datetime.date(),
                             trade_datetime=trade_datetime,
                             operation=buy_sell.lower(),
-                            quantity=round_qty(abs(float(quantity))),
-                            price_ccy=round_money(float(trade_price)),
+                            quantity=round_qty(abs(to_decimal(quantity))),
+                            price_ccy=round_money(to_decimal(trade_price)),
                             currency=currency.strip(),
                             trade_id=trade_id.strip(),
                             account_id=(row.get("accountId") or "").strip(),
                             source_statement_file=path,
                             asset_class=asset_class,
                             net_cash_ccy=(
-                                round_money(abs(float(row.get("netCash"))))
+                                round_money(abs(to_decimal(row.get("netCash"))))
                                 if row.get("netCash") not in (None, "")
                                 else None
                             ),
                             fee_ccy=(
-                                round_money(abs(float(row.get("commission"))))
+                                round_money(abs(to_decimal(row.get("commission"))))
                                 if row.get("commission") not in (None, "")
                                 else round_money(
                                     max(
-                                        0.0,
+                                        Decimal("0"),
                                         (
-                                            abs(float(row.get("netCash")))
+                                            abs(to_decimal(row.get("netCash")))
                                             if row.get("netCash") not in (None, "")
-                                            else abs(float(quantity)) * float(trade_price)
+                                            else abs(to_decimal(quantity)) * to_decimal(trade_price)
                                         )
-                                        - (abs(float(quantity)) * float(trade_price))
+                                        - (abs(to_decimal(quantity)) * to_decimal(trade_price))
                                         if buy_sell == "BUY"
-                                        else (abs(float(quantity)) * float(trade_price))
+                                        else (abs(to_decimal(quantity)) * to_decimal(trade_price))
                                         - (
-                                            abs(float(row.get("netCash")))
+                                            abs(to_decimal(row.get("netCash")))
                                             if row.get("netCash") not in (None, "")
-                                            else abs(float(quantity)) * float(trade_price)
+                                            else abs(to_decimal(quantity)) * to_decimal(trade_price)
                                         ),
                                     )
                                 )
@@ -161,19 +163,22 @@ def build_fx_table_from_rates_df(
     rates_df: pl.DataFrame,
     *,
     currencies: Iterable[str],
-) -> dict[str, tuple[list[date], list[float]]]:
-    fx_table: dict[str, tuple[list[date], list[float]]] = {}
+) -> dict[str, tuple[list[date], list[Decimal]]]:
+    fx_table: dict[str, tuple[list[date], list[Decimal]]] = {}
     for currency in sorted({currency for currency in currencies if currency != "EUR"}):
         currency_df = rates_df.filter(pl.col("currency") == currency).sort("rate_date")
         if currency_df.is_empty():
             raise ValueError(f"Missing FX series for currency {currency}")
-        fx_table[currency] = (currency_df["rate_date"].to_list(), currency_df["exchange_rate"].to_list())
+        fx_table[currency] = (
+            currency_df["rate_date"].to_list(),
+            [quantize_fx(value) for value in currency_df["exchange_rate"].to_list()],
+        )
     return fx_table
 
 
-def get_fx_rate(fx_table: dict[str, tuple[list[date], list[float]]], currency: str, event_date: date) -> float:
+def get_fx_rate(fx_table: dict[str, tuple[list[date], list[Decimal]]], currency: str, event_date: date) -> Decimal:
     if currency == "EUR":
-        return 1.0
+        return Decimal("1")
 
     if currency not in fx_table:
         raise ValueError(f"Missing FX series for currency {currency}")
@@ -190,4 +195,4 @@ def get_fx_rate(fx_table: dict[str, tuple[list[date], list[float]]], currency: s
             f"(>{EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET} days)"
         )
 
-    return float(available_rates[index])
+    return quantize_fx(available_rates[index])

@@ -38,9 +38,9 @@ def test_process_wise_usd(rates_df):
             Column.profit_total: [15.3143],
             # Column.amount_euro_received_total: [9.9989],
             Column.profit_euro_total: [14.2841],
-            Column.withholding_tax_euro_total: [4.2852],
+            Column.withholding_tax_euro_total: [4.2853],
             Column.profit_euro_net_total: [8.2134],
-            Column.kest_gross_total: [3.9281],
+            Column.kest_gross_total: [3.9282],
             Column.kest_net_total: [1.7855],
         }
     )
@@ -88,7 +88,7 @@ def test_process_wise_euro_2025_real_file(rates_df_2025):
             Column.withholding_tax_euro_total: [12.81],
             Column.profit_euro_net_total: [24.5525],
             Column.kest_gross_total: [11.7425],
-            Column.kest_net_total: [5.3375],
+            Column.kest_net_total: [5.3374],
         }
     )
 

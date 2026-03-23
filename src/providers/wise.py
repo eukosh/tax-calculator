@@ -4,6 +4,7 @@ from datetime import date
 import polars as pl
 
 from src.const import FLOAT_PRECISION, Column
+from src.precision import PL_MONEY_DTYPE, cast_decimal_columns_to_float, decimal_lit
 from src.utils import calculate_kest, convert_to_euro, join_exchange_rates, read_csv_to_df
 
 
@@ -37,15 +38,15 @@ def process_wise_statement(
     # wise tax witheld rate is Belgium's 30% thus divide by 70
     gross_amount_recovered_df = converted_euro_df.with_columns(
         [
-            (pl.col(Column.amount) * 100 / 70).alias(Column.profit_gross),
-            (pl.col(Column.amount_euro) * 100 / 70).alias(Column.profit_gross_euro),
+            ((pl.col(Column.amount).cast(PL_MONEY_DTYPE) * decimal_lit("100") / decimal_lit("70")).round(FLOAT_PRECISION)).alias(Column.profit_gross),
+            ((pl.col(Column.amount_euro).cast(PL_MONEY_DTYPE) * decimal_lit("100") / decimal_lit("70")).round(FLOAT_PRECISION)).alias(Column.profit_gross_euro),
         ]
     )
 
     gross_amount_recovered_df = gross_amount_recovered_df.with_columns(
         [
-            (pl.col(Column.profit_gross) - pl.col(Column.amount)).alias(Column.withholding_tax),
-            (pl.col(Column.profit_gross_euro) - pl.col(Column.amount_euro)).alias(Column.withholding_tax_euro),
+            (pl.col(Column.profit_gross).cast(PL_MONEY_DTYPE) - pl.col(Column.amount).cast(PL_MONEY_DTYPE)).round(FLOAT_PRECISION).alias(Column.withholding_tax),
+            (pl.col(Column.profit_gross_euro).cast(PL_MONEY_DTYPE) - pl.col(Column.amount_euro).cast(PL_MONEY_DTYPE)).round(FLOAT_PRECISION).alias(Column.withholding_tax_euro),
         ]
     )
     logging.debug(gross_amount_recovered_df)
@@ -74,4 +75,4 @@ def process_wise_statement(
         .sort(Column.profit_euro_total, descending=True)
     )
 
-    return summary_df
+    return cast_decimal_columns_to_float(summary_df)

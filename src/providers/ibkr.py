@@ -30,6 +30,7 @@ from src.moving_average import (
     position_states_to_df,
     replay_events,
 )
+from src.precision import cast_decimal_columns_to_float
 from src.utils import (
     build_separate_trade_profit_loss_rows,
     calculate_kest,
@@ -114,7 +115,8 @@ def apply_pivot(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def agg_final_transactions(df: pl.DataFrame) -> pl.DataFrame:
-    return (
+    return cast_decimal_columns_to_float(
+        (
         df.group_by("issuer_country_code", Col.currency)
         .agg(
             pl.sum("dividends").round(FLOAT_PRECISION).alias(Col.profit_total),
@@ -125,6 +127,7 @@ def agg_final_transactions(df: pl.DataFrame) -> pl.DataFrame:
             pl.sum("kest_net").round(FLOAT_PRECISION).alias("kest_net_total"),
         )
         .sort("dividends_euro_total", descending=True)
+        )
     )
 
 
@@ -479,7 +482,7 @@ def _build_trade_summary_df(
             tax_withheld_col=None,
             net_col_name="taxable_profit_euro_net",
         )
-        return trades_tax_df.select(
+        return cast_decimal_columns_to_float(trades_tax_df.select(
             pl.lit(CurrencyCode.euro.value).alias(Col.currency),
             pl.col(Col.profit_total),
             pl.col(Col.profit_euro_total),
@@ -489,7 +492,7 @@ def _build_trade_summary_df(
             pl.lit(0.0).alias(Col.withholding_tax_euro_total),
             pl.col(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
             pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
-        )
+        ))
 
     summary_frames = build_separate_trade_profit_loss_rows(trades_totals_df)
     return pl.concat(summary_frames, how="vertical_relaxed") if summary_frames else None
@@ -742,7 +745,7 @@ def process_bonds_ibkr(
     )
     logging.info(country_agg_df)
 
-    return tax_df, country_agg_df
+    return cast_decimal_columns_to_float(tax_df), cast_decimal_columns_to_float(country_agg_df)
 
 
 def calculate_summary_ibkr(
@@ -823,4 +826,4 @@ def calculate_summary_ibkr(
         )
         merge_dfs.append(section_summary_df)
 
-    return pl.concat(merge_dfs, how="vertical_relaxed")
+    return cast_decimal_columns_to_float(pl.concat(merge_dfs, how="vertical_relaxed"))

@@ -1,6 +1,7 @@
 import glob
 import json
 import logging
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Sequence, TypeGuard, Union
 
@@ -15,6 +16,7 @@ from src.const import (
     Column,
     CurrencyCode,
 )
+from src.precision import PL_FX_DTYPE, PL_MONEY_DTYPE, cast_decimal_columns_to_float, decimal_lit, money_lit
 
 
 def has_rows(df: pl.DataFrame | None) -> TypeGuard[pl.DataFrame]:
@@ -203,8 +205,12 @@ def convert_to_euro(df: pl.DataFrame, col_to_convert: Union[str, Sequence[str]])
     cols_conversion_expr = [
         (
             pl.when(pl.col(Column.currency) != CurrencyCode.euro)
-            .then((pl.col(col) / pl.col(Column.exchange_rate)).round(FLOAT_PRECISION))
-            .otherwise(pl.col(col))
+            .then(
+                (pl.col(col).cast(PL_MONEY_DTYPE) / pl.col(Column.exchange_rate).cast(PL_FX_DTYPE))
+                .round(FLOAT_PRECISION)
+                .cast(PL_MONEY_DTYPE)
+            )
+            .otherwise(pl.col(col).cast(PL_MONEY_DTYPE))
         ).alias(f"{col}_euro")
         for col in col_to_convert
     ]
@@ -223,28 +229,28 @@ def build_separate_trade_profit_loss_rows(
     profit_row_df = totals_df.select(
         pl.lit("trades profit").alias(Column.type),
         pl.lit(CurrencyCode.euro.value).alias(Column.currency),
-        pl.col(profit_col).alias(Column.profit_total),
-        pl.col(profit_col).alias(Column.profit_euro_total),
-        pl.col(profit_col).alias(Column.profit_euro_net_total),
-        pl.lit(0.0).alias(Column.withholding_tax_euro_total),
-        pl.lit(0.0).alias(Column.kest_gross_total),
-        pl.lit(0.0).alias(Column.kest_net_total),
+        pl.col(profit_col).cast(PL_MONEY_DTYPE).alias(Column.profit_total),
+        pl.col(profit_col).cast(PL_MONEY_DTYPE).alias(Column.profit_euro_total),
+        pl.col(profit_col).cast(PL_MONEY_DTYPE).alias(Column.profit_euro_net_total),
+        money_lit(0).alias(Column.withholding_tax_euro_total),
+        money_lit(0).alias(Column.kest_gross_total),
+        money_lit(0).alias(Column.kest_net_total),
     ).filter(pl.col(Column.profit_euro_total) != 0)
     if not profit_row_df.is_empty():
-        frames.append(profit_row_df)
+        frames.append(cast_decimal_columns_to_float(profit_row_df))
 
     loss_row_df = totals_df.select(
         pl.lit("trades loss").alias(Column.type),
         pl.lit(CurrencyCode.euro.value).alias(Column.currency),
-        (-pl.col(loss_col)).round(FLOAT_PRECISION).alias(Column.profit_total),
-        (-pl.col(loss_col)).round(FLOAT_PRECISION).alias(Column.profit_euro_total),
-        (-pl.col(loss_col)).round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
-        pl.lit(0.0).alias(Column.withholding_tax_euro_total),
-        pl.lit(0.0).alias(Column.kest_gross_total),
-        pl.lit(0.0).alias(Column.kest_net_total),
+        (-pl.col(loss_col).cast(PL_MONEY_DTYPE)).round(FLOAT_PRECISION).alias(Column.profit_total),
+        (-pl.col(loss_col).cast(PL_MONEY_DTYPE)).round(FLOAT_PRECISION).alias(Column.profit_euro_total),
+        (-pl.col(loss_col).cast(PL_MONEY_DTYPE)).round(FLOAT_PRECISION).alias(Column.profit_euro_net_total),
+        money_lit(0).alias(Column.withholding_tax_euro_total),
+        money_lit(0).alias(Column.kest_gross_total),
+        money_lit(0).alias(Column.kest_net_total),
     ).filter(pl.col(Column.profit_euro_total) != 0)
     if not loss_row_df.is_empty():
-        frames.append(loss_row_df)
+        frames.append(cast_decimal_columns_to_float(loss_row_df))
 
     return frames
 
@@ -255,24 +261,24 @@ def calculate_kest(
     # Net Austrian KESt=Austrian KESt on Gross amount − min(Foreign Withholding Tax,Treaty Rate × Gross Dividends)
     # keep in mind that witholding tax is negative number, it causes error in formula
     # Negative capital amounts represent losses. They should remain losses, not create negative KESt.
-    taxable_amount = pl.col(amount_col).clip(lower_bound=0.0)
-    kest_gross = taxable_amount * KEST_RATE
+    taxable_amount = pl.col(amount_col).cast(PL_MONEY_DTYPE).clip(lower_bound=Decimal("0"))
+    kest_gross = (taxable_amount * decimal_lit(str(KEST_RATE))).round(FLOAT_PRECISION).cast(PL_MONEY_DTYPE)
     kest_net = (
-        (kest_gross)
+        kest_gross
         - pl.min_horizontal(
-            pl.col(tax_withheld_col),
-            MAX_DTT_RATE * taxable_amount,
+            pl.col(tax_withheld_col).cast(PL_MONEY_DTYPE),
+            (decimal_lit(str(MAX_DTT_RATE)) * taxable_amount).round(FLOAT_PRECISION).cast(PL_MONEY_DTYPE),
         )
         if tax_withheld_col
         else kest_gross
     )
     df = df.with_columns(
-        kest_gross=kest_gross,
-        kest_net=kest_net,
+        kest_gross=kest_gross.round(FLOAT_PRECISION).cast(PL_MONEY_DTYPE),
+        kest_net=kest_net.round(FLOAT_PRECISION).cast(PL_MONEY_DTYPE),
     )
-    amount_net = pl.col(amount_col) - pl.col("kest_net")
+    amount_net = pl.col(amount_col).cast(PL_MONEY_DTYPE) - pl.col("kest_net").cast(PL_MONEY_DTYPE)
     if tax_withheld_col:
-        amount_net = amount_net - pl.col(tax_withheld_col)
+        amount_net = amount_net - pl.col(tax_withheld_col).cast(PL_MONEY_DTYPE)
     return df.with_columns(
-        amount_net.alias(net_col_name or f"{amount_col}_net"),
+        amount_net.round(FLOAT_PRECISION).cast(PL_MONEY_DTYPE).alias(net_col_name or f"{amount_col}_net"),
     )

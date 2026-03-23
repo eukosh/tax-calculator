@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 from collections import defaultdict
+from decimal import Decimal
 from datetime import date, datetime
 from pathlib import Path
 
@@ -40,10 +41,10 @@ def _parse_optional_date(raw_value: str | None) -> date | None:
     raise ValueError(f"Unsupported IBKR date value: {raw_value!r}")
 
 
-def _parse_optional_float(raw_value: str | None) -> float | None:
+def _parse_optional_float(raw_value: str | None) -> Decimal | None:
     if raw_value is None or raw_value == "":
         return None
-    return round_money(float(raw_value))
+    return round_money(Decimal(raw_value))
 
 
 def _resolve_file_paths(xml_file_path: str) -> list[str]:
@@ -128,8 +129,8 @@ def load_ibkr_etf_trades(xml_file_path: str, require_raw_trades: bool) -> list[I
                 trade_date=trade_datetime.date(),
                 trade_datetime=trade_datetime,
                 operation=buy_sell.lower(),
-                quantity=round_qty(abs(float(quantity))),
-                price_ccy=round_money(float(trade_price)),
+                quantity=round_qty(abs(Decimal(quantity))),
+                price_ccy=round_money(Decimal(trade_price)),
                 currency=currency.strip(),
                 trade_id=trade_id.strip(),
                 account_id=(row.get("accountId") or "").strip(),
@@ -178,7 +179,7 @@ def load_ibkr_etf_dividend_accrual_rows(xml_file_path: str) -> list[IbkrDividend
                 date=effective_date,
                 ex_date=_parse_optional_date(row.get("exDate")),
                 pay_date=pay_date,
-                quantity=round_qty(float(quantity)),
+                quantity=round_qty(Decimal(quantity)),
                 tax=_parse_optional_float(row.get("tax")),
                 gross_rate=_parse_optional_float(row.get("grossRate")),
                 gross_amount=_parse_optional_float(row.get("grossAmount")),
@@ -221,7 +222,7 @@ def load_ibkr_etf_cash_dividend_rows(xml_file_path: str) -> list[IbkrCashDividen
                 currency=currency,
                 settle_date=settle_date,
                 ex_date=_parse_optional_date(row.get("exDate")),
-                amount=round_money(float(amount)),
+                amount=round_money(Decimal(amount)),
                 action_id=(row.get("actionID") or "").strip(),
                 account_id=(row.get("accountId") or "").strip(),
                 report_date=_parse_optional_date(row.get("reportDate")),

@@ -60,10 +60,10 @@ def test_process_revolut_savings_statement_euro(rates_df):
             Column.currency: [CurrencyCode.euro],
             Column.profit_total: [0.54],
             Column.profit_euro_total: [0.54],
-            Column.profit_euro_net_total: [0.3915],
+            Column.profit_euro_net_total: [0.3916],
             Column.withholding_tax_euro_total: [0.0],
-            Column.kest_gross_total: [0.1485],
-            Column.kest_net_total: [0.1485],
+            Column.kest_gross_total: [0.1484],
+            Column.kest_net_total: [0.1484],
         }
     ).cast({Column.currency: pl.String})
 
@@ -105,11 +105,11 @@ def test_process_revolut_savings_statement_usd_2025_real_file(rates_df_2025):
         {
             Column.currency: [CurrencyCode.usd],
             Column.profit_total: [74.52],
-            Column.profit_euro_total: [66.1382],
-            Column.profit_euro_net_total: [47.9502],
+            Column.profit_euro_total: [66.1375],
+            Column.profit_euro_net_total: [47.9497],
             Column.withholding_tax_euro_total: [0.0],
-            Column.kest_gross_total: [18.188],
-            Column.kest_net_total: [18.188],
+            Column.kest_gross_total: [18.1878],
+            Column.kest_net_total: [18.1878],
         }
     ).cast({Column.currency: pl.String})
 

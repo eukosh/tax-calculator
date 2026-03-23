@@ -19,6 +19,7 @@ from src.finanzonline import (
     ORDINARY_INCOME_BUCKET_CATEGORY,
     empty_finanzonline_bucket_df,
 )
+from src.precision import cast_decimal_columns_to_float
 from src.utils import build_separate_trade_profit_loss_rows, calculate_kest, convert_to_euro, join_exchange_rates, read_json
 
 EMPTY_VALUE = "-"
@@ -348,7 +349,8 @@ def _summarize_dividends(
     if tax_df is None:
         return None
 
-    return (
+    return cast_decimal_columns_to_float(
+        (
         tax_df.group_by("_summary_type", Col.currency)
         .agg(
             pl.sum(Col.amount).round(FLOAT_PRECISION).alias(Col.profit_total),
@@ -360,6 +362,7 @@ def _summarize_dividends(
         )
         .rename({"_summary_type": Col.type})
         .select(SUMMARY_COLUMNS)
+        )
     )
 
 
@@ -632,7 +635,7 @@ def _summarize_trades(trades_df: pl.DataFrame, separate_trade_profit_loss: bool)
             tax_withheld_col=None,
             net_col_name="taxable_profit_euro_net",
         )
-        return totals_tax_df.select(
+        return cast_decimal_columns_to_float(totals_tax_df.select(
             pl.lit("trades").alias(Col.type),
             pl.lit(CurrencyCode.euro.value).alias(Col.currency),
             pl.col(Col.profit_euro_total).alias(Col.profit_total),
@@ -641,7 +644,7 @@ def _summarize_trades(trades_df: pl.DataFrame, separate_trade_profit_loss: bool)
             pl.lit(0.0).alias(Col.withholding_tax_euro_total),
             pl.col(Col.kest_gross).round(FLOAT_PRECISION).alias(Col.kest_gross_total),
             pl.col(Col.kest_net).round(FLOAT_PRECISION).alias(Col.kest_net_total),
-        )
+        ))
 
     summary_frames = build_separate_trade_profit_loss_rows(totals_df)
     return pl.concat(summary_frames, how="vertical_relaxed") if summary_frames else None
@@ -716,4 +719,4 @@ def process_freedom_statement(
 
     summary_df = pl.concat(summary_frames, how="vertical_relaxed").sort([Col.type, Col.currency])
     logging.info("Freedom Finance Summary: %s", summary_df)
-    return summary_df.select(SUMMARY_COLUMNS)
+    return cast_decimal_columns_to_float(summary_df.select(SUMMARY_COLUMNS))

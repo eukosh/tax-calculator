@@ -2,6 +2,7 @@
 # https://www.oenb.at/isawebstat/stabfrage/createReport?lang=EN&original=false&report=2.14.9
 import logging
 import os
+from decimal import Decimal
 from datetime import date, timedelta
 from typing import Sequence
 
@@ -9,6 +10,7 @@ import polars as pl
 import requests
 
 from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
+from src.precision import PL_FX_DTYPE, quantize_fx
 
 
 class ExchangeRatesCacheError(ValueError):
@@ -50,9 +52,10 @@ class ExchangeRates:
 
     def _fetch_and_store_exchange_rates(self):
         url = f"https://data-api.ecb.europa.eu/service/data/EXR/D.{self.currency_str}.EUR.SP00.A"
+        offset = timedelta(days=EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET)
         params = {
-            "startPeriod": self.start_date.isoformat(),
-            "endPeriod": self.end_date.isoformat(),
+            "startPeriod": (self.start_date - offset).isoformat(),
+            "endPeriod": (self.end_date + offset).isoformat(),
             "format": "csvdata",
         }
         logging.info(f"Fetching exchange rates from {url}")
@@ -84,7 +87,7 @@ class ExchangeRates:
                 pl.col("TIME_PERIOD").str.strptime(pl.Date, "%Y-%m-%d").alias("rate_date"),
                 pl.col("CURRENCY").alias("currency"),
                 pl.col("CURRENCY_DENOM").alias("currency_denom"),
-                pl.col("OBS_VALUE").cast(pl.Float64).alias("exchange_rate"),
+                pl.col("OBS_VALUE").cast(pl.String).map_elements(lambda value: quantize_fx(Decimal(value)), return_dtype=PL_FX_DTYPE).alias("exchange_rate"),
                 # pl.col("TITLE").alias("description"),
             ]
         )
@@ -98,7 +101,7 @@ class ExchangeRates:
         missing_currencies = set(self.currencies) - available_currencies
         if missing_currencies:
             raise ExchangeRatesCacheError(
-                f"Exchange rates are missing requested currencies: {sorted(missing_currencies)}"
+                f"Exchange rates file is missing requested currencies: {sorted(missing_currencies)}"
             )
 
         min_rate_date_raw = self.df["rate_date"].min()

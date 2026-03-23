@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from datetime import date, datetime
 
 from src.broker_history import round_money, round_qty
+from src.precision import to_output_float
 
 
 def _append_unique_note_text(existing: str, incoming: str) -> str:
@@ -29,8 +31,8 @@ class IbkrTrade:
     trade_date: date
     trade_datetime: datetime
     operation: str
-    quantity: float
-    price_ccy: float
+    quantity: Decimal
+    price_ccy: Decimal
     currency: str
     trade_id: str
     account_id: str = ""
@@ -51,20 +53,20 @@ class OekbReport:
     meldezeitraum_ende: date | None
     geschaeftsjahres_beginn: date | None
     geschaeftsjahres_ende: date | None
-    reported_distribution_per_share_ccy: float
-    age_per_share_ccy: float
-    non_reported_distribution_per_share_ccy: float
-    creditable_foreign_tax_per_share_ccy: float
-    acquisition_cost_correction_per_share_ccy: float
+    reported_distribution_per_share_ccy: Decimal
+    age_per_share_ccy: Decimal
+    non_reported_distribution_per_share_ccy: Decimal
+    creditable_foreign_tax_per_share_ccy: Decimal
+    acquisition_cost_correction_per_share_ccy: Decimal
     source_file: str
-    domestic_dividends_loss_offset_per_share_ccy: float = 0.0
-    domestic_dividend_kest_per_share_ccy: float = 0.0
-    total_shares_at_inflow: float | None = None
-    total_distributions_per_share_ccy: float | None = None
-    capital_repayment_per_share_ccy: float | None = None
-    basis_age_component_per_share_ccy: float | None = None
-    basis_distribution_component_per_share_ccy: float | None = None
-    withheld_tax_on_non_reported_distributions_per_share_ccy: float | None = None
+    domestic_dividends_loss_offset_per_share_ccy: Decimal = Decimal("0")
+    domestic_dividend_kest_per_share_ccy: Decimal = Decimal("0")
+    total_shares_at_inflow: Decimal | None = None
+    total_distributions_per_share_ccy: Decimal | None = None
+    capital_repayment_per_share_ccy: Decimal | None = None
+    basis_age_component_per_share_ccy: Decimal | None = None
+    basis_distribution_component_per_share_ccy: Decimal | None = None
+    withheld_tax_on_non_reported_distributions_per_share_ccy: Decimal | None = None
 
     @property
     def eligibility_date(self) -> date:
@@ -92,11 +94,11 @@ class IbkrDividendAccrualRow:
     date: date
     ex_date: date | None
     pay_date: date | None
-    quantity: float
-    tax: float | None
-    gross_rate: float | None
-    gross_amount: float | None
-    net_amount: float | None
+    quantity: Decimal
+    tax: Decimal | None
+    gross_rate: Decimal | None
+    gross_amount: Decimal | None
+    net_amount: Decimal | None
     code: str
     action_id: str
     account_id: str = ""
@@ -110,7 +112,7 @@ class IbkrCashDividendRow:
     currency: str
     settle_date: date
     ex_date: date | None
-    amount: float
+    amount: Decimal
     action_id: str
     account_id: str = ""
     report_date: date | None = None
@@ -124,17 +126,17 @@ class BrokerDividendEvent:
     currency: str
     ex_date: date | None
     pay_date: date
-    quantity: float
-    gross_rate: float | None
-    gross_amount: float | None
-    net_amount: float | None
-    tax: float | None
+    quantity: Decimal
+    gross_rate: Decimal | None
+    gross_amount: Decimal | None
+    net_amount: Decimal | None
+    tax: Decimal | None
     has_po: bool
     has_re: bool
     action_id: str
     source_statement_file: str
-    cash_amount: float | None = None
-    accrual_amount: float | None = None
+    cash_amount: Decimal | None = None
+    accrual_amount: Decimal | None = None
     matching_notes: str = ""
     evidence_state: str = "confirmed_cash"
 
@@ -153,11 +155,11 @@ class PayoutStateRow:
     isin: str
     ex_date: date | None
     pay_date: date
-    quantity: float
+    quantity: Decimal
     currency: str
-    broker_gross_amount_ccy: float
-    broker_net_amount_ccy: float
-    broker_tax_amount_ccy: float
+    broker_gross_amount_ccy: Decimal
+    broker_net_amount_ccy: Decimal
+    broker_tax_amount_ccy: Decimal
     source_tax_year: int
     evidence_state: str
     status: str
@@ -181,11 +183,11 @@ class PayoutStateRow:
             "isin": self.isin,
             "ex_date": self.ex_date.isoformat() if self.ex_date else "",
             "pay_date": self.pay_date.isoformat(),
-            "quantity": round_qty(self.quantity),
+            "quantity": to_output_float(round_qty(self.quantity)),
             "currency": self.currency,
-            "broker_gross_amount_ccy": round_money(self.broker_gross_amount_ccy),
-            "broker_net_amount_ccy": round_money(self.broker_net_amount_ccy),
-            "broker_tax_amount_ccy": round_money(self.broker_tax_amount_ccy),
+            "broker_gross_amount_ccy": to_output_float(round_money(self.broker_gross_amount_ccy)),
+            "broker_net_amount_ccy": to_output_float(round_money(self.broker_net_amount_ccy)),
+            "broker_tax_amount_ccy": to_output_float(round_money(self.broker_tax_amount_ccy)),
             "source_tax_year": self.source_tax_year,
             "evidence_state": self.evidence_state,
             "status": self.status,
@@ -205,13 +207,13 @@ class Lot:
     isin: str
     lot_id: str
     buy_date: date
-    original_quantity: float
-    remaining_quantity: float
+    original_quantity: Decimal
+    remaining_quantity: Decimal
     currency: str
-    buy_price_ccy: float
-    buy_fx_to_eur: float
-    original_cost_eur: float
-    cumulative_oekb_stepup_eur: float = 0.0
+    buy_price_ccy: Decimal
+    buy_fx_to_eur: Decimal
+    original_cost_eur: Decimal
+    cumulative_oekb_stepup_eur: Decimal = Decimal("0")
     status: str = "open"
     broker: str = "ibkr"
     account_id: str = ""
@@ -219,12 +221,12 @@ class Lot:
     last_adjustment_year: str = ""
     last_adjustment_reference: str = ""
     last_sale_date: str = ""
-    sold_quantity_ytd: float = 0.0
+    sold_quantity_ytd: Decimal = Decimal("0")
     source_trade_id: str = ""
     source_statement_file: str = ""
 
     @property
-    def adjusted_basis_eur(self) -> float:
+    def adjusted_basis_eur(self) -> Decimal:
         return round_money(self.original_cost_eur + self.cumulative_oekb_stepup_eur)
 
     def add_note(self, note: str) -> None:
@@ -238,14 +240,14 @@ class Lot:
             "isin": self.isin,
             "lot_id": self.lot_id,
             "buy_date": self.buy_date.isoformat(),
-            "original_quantity": round_qty(self.original_quantity),
-            "remaining_quantity": round_qty(self.remaining_quantity),
+            "original_quantity": to_output_float(round_qty(self.original_quantity)),
+            "remaining_quantity": to_output_float(round_qty(self.remaining_quantity)),
             "currency": self.currency,
-            "buy_price_ccy": round_money(self.buy_price_ccy),
-            "buy_fx_to_eur": round_money(self.buy_fx_to_eur),
-            "original_cost_eur": round_money(self.original_cost_eur),
-            "cumulative_oekb_stepup_eur": round_money(self.cumulative_oekb_stepup_eur),
-            "adjusted_basis_eur": self.adjusted_basis_eur,
+            "buy_price_ccy": to_output_float(round_money(self.buy_price_ccy)),
+            "buy_fx_to_eur": to_output_float(round_money(self.buy_fx_to_eur)),
+            "original_cost_eur": to_output_float(round_money(self.original_cost_eur)),
+            "cumulative_oekb_stepup_eur": to_output_float(round_money(self.cumulative_oekb_stepup_eur)),
+            "adjusted_basis_eur": to_output_float(self.adjusted_basis_eur),
             "status": self.status,
             "broker": self.broker,
             "account_id": self.account_id,
@@ -253,7 +255,7 @@ class Lot:
             "last_adjustment_year": self.last_adjustment_year,
             "last_adjustment_reference": self.last_adjustment_reference,
             "last_sale_date": self.last_sale_date,
-            "sold_quantity_ytd": round_qty(self.sold_quantity_ytd),
+            "sold_quantity_ytd": to_output_float(round_qty(self.sold_quantity_ytd)),
             "source_trade_id": self.source_trade_id,
             "source_statement_file": self.source_statement_file,
         }

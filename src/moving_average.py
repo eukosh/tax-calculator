@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
@@ -8,6 +9,7 @@ from typing import Iterable
 import polars as pl
 
 from src.broker_history import round_money, round_qty
+from src.precision import to_decimal, to_output_float
 
 EVENT_TYPE_AUSTRIAN_BASIS_RESET = "austrian_basis_reset"
 EVENT_TYPE_BUY = "buy"
@@ -25,9 +27,9 @@ class PositionState:
     isin: str
     currency: str
     asset_class: str = ""
-    quantity: float = 0.0
-    base_cost_total_eur: float = 0.0
-    basis_adjustment_total_eur: float = 0.0
+    quantity: Decimal = Decimal("0")
+    base_cost_total_eur: Decimal = Decimal("0")
+    basis_adjustment_total_eur: Decimal = Decimal("0")
     last_event_date: str = ""
     basis_method: str = ""
     snapshot_date: str = ""
@@ -35,13 +37,13 @@ class PositionState:
     notes: str = ""
 
     @property
-    def total_basis_eur(self) -> float:
+    def total_basis_eur(self) -> Decimal:
         return round_money(self.base_cost_total_eur + self.basis_adjustment_total_eur)
 
     @property
-    def average_basis_eur(self) -> float:
+    def average_basis_eur(self) -> Decimal:
         if self.quantity <= 0:
-            return 0.0
+            return Decimal("0")
         return round_money(self.total_basis_eur / self.quantity)
 
     @property
@@ -54,11 +56,11 @@ class PositionState:
             "isin": self.isin,
             "asset_class": self.asset_class,
             "currency": self.currency,
-            "quantity": round_qty(self.quantity),
-            "base_cost_total_eur": round_money(self.base_cost_total_eur),
-            "basis_adjustment_total_eur": round_money(self.basis_adjustment_total_eur),
-            "total_basis_eur": self.total_basis_eur,
-            "average_basis_eur": self.average_basis_eur,
+            "quantity": to_output_float(round_qty(self.quantity)),
+            "base_cost_total_eur": to_output_float(round_money(self.base_cost_total_eur)),
+            "basis_adjustment_total_eur": to_output_float(round_money(self.basis_adjustment_total_eur)),
+            "total_basis_eur": to_output_float(self.total_basis_eur),
+            "average_basis_eur": to_output_float(self.average_basis_eur),
             "status": self.status,
             "last_event_date": self.last_event_date,
             "basis_method": self.basis_method,
@@ -79,18 +81,18 @@ class PositionEvent:
     effective_date: date
     eligibility_date: date | None = None
     asset_class: str = ""
-    quantity: float = 0.0
-    quantity_delta: float = 0.0
-    price_ccy: float | None = None
-    fx_to_eur: float | None = None
-    base_cost_delta_eur: float = 0.0
-    basis_adjustment_delta_eur: float = 0.0
-    proceeds_eur: float = 0.0
-    realized_basis_eur: float = 0.0
-    realized_gain_loss_eur: float = 0.0
-    realized_base_cost_eur: float = 0.0
-    realized_oekb_adjustment_eur: float = 0.0
-    split_ratio: float | None = None
+    quantity: Decimal = Decimal("0")
+    quantity_delta: Decimal = Decimal("0")
+    price_ccy: Decimal | None = None
+    fx_to_eur: Decimal | None = None
+    base_cost_delta_eur: Decimal = Decimal("0")
+    basis_adjustment_delta_eur: Decimal = Decimal("0")
+    proceeds_eur: Decimal = Decimal("0")
+    realized_basis_eur: Decimal = Decimal("0")
+    realized_gain_loss_eur: Decimal = Decimal("0")
+    realized_base_cost_eur: Decimal = Decimal("0")
+    realized_oekb_adjustment_eur: Decimal = Decimal("0")
+    split_ratio: Decimal | None = None
     basis_method: str = ""
     source_id: str = ""
     source_file: str = ""
@@ -139,9 +141,9 @@ def build_buy_event(
     currency: str,
     asset_class: str,
     trade_date: date,
-    quantity: float,
-    price_ccy: float,
-    fx_to_eur: float,
+    quantity: Decimal,
+    price_ccy: Decimal,
+    fx_to_eur: Decimal,
     source_id: str,
     source_file: str,
     sequence_key: int = 0,
@@ -176,9 +178,9 @@ def build_sell_event(
     currency: str,
     asset_class: str,
     trade_date: date,
-    quantity: float,
-    price_ccy: float,
-    fx_to_eur: float,
+    quantity: Decimal,
+    price_ccy: Decimal,
+    fx_to_eur: Decimal,
     source_id: str,
     source_file: str,
     notes: str = "",
@@ -215,9 +217,9 @@ def build_basis_reset_event(
     currency: str,
     asset_class: str,
     event_date: date,
-    quantity: float,
-    base_cost_total_eur: float,
-    basis_adjustment_total_eur: float = 0.0,
+    quantity: Decimal,
+    base_cost_total_eur: Decimal,
+    basis_adjustment_total_eur: Decimal = Decimal("0"),
     basis_method: str = "",
     source_file: str = "",
     notes: str = "",
@@ -252,8 +254,8 @@ def build_basis_adjustment_event(
     asset_class: str,
     eligibility_date: date,
     effective_date: date,
-    basis_adjustment_eur: float,
-    quantity: float,
+    basis_adjustment_eur: Decimal,
+    quantity: Decimal,
     source_id: str,
     source_file: str,
     notes: str = "",
@@ -286,7 +288,7 @@ def build_split_event(
     currency: str,
     asset_class: str,
     event_date: date,
-    split_ratio: float,
+    split_ratio: Decimal,
     source_id: str,
     source_file: str,
     notes: str = "",
@@ -303,7 +305,7 @@ def build_split_event(
         asset_class=asset_class,
         event_date=event_date,
         effective_date=event_date,
-        split_ratio=float(split_ratio),
+        split_ratio=to_decimal(split_ratio),
         source_id=source_id,
         source_file=source_file,
         notes=notes,
@@ -319,9 +321,9 @@ def state_from_record(row: dict[str, object]) -> PositionState:
             isin=str(row["isin"]),
             currency=str(row["currency"]),
             asset_class=str(row.get("asset_class") or ""),
-            quantity=round_qty(float(row.get("quantity") or 0.0)),
-            base_cost_total_eur=round_money(float(row.get("base_cost_total_eur") or 0.0)),
-            basis_adjustment_total_eur=round_money(float(row.get("basis_adjustment_total_eur") or 0.0)),
+            quantity=round_qty(to_decimal(row.get("quantity") or 0)),
+            base_cost_total_eur=round_money(to_decimal(row.get("base_cost_total_eur") or 0)),
+            basis_adjustment_total_eur=round_money(to_decimal(row.get("basis_adjustment_total_eur") or 0)),
             last_event_date=str(row.get("last_event_date") or ""),
             basis_method=str(row.get("basis_method") or ""),
             snapshot_date=str(row.get("snapshot_date") or ""),
@@ -336,9 +338,9 @@ def state_from_record(row: dict[str, object]) -> PositionState:
         isin=str(row["isin"]),
         currency=str(row["currency"]),
         asset_class=str(row.get("asset_class") or ""),
-        quantity=round_qty(float(row.get("remaining_quantity") or 0.0)),
-        base_cost_total_eur=round_money(float(row.get("original_cost_eur") or 0.0)),
-        basis_adjustment_total_eur=round_money(float(row.get("cumulative_oekb_stepup_eur") or 0.0)),
+        quantity=round_qty(to_decimal(row.get("remaining_quantity") or 0)),
+        base_cost_total_eur=round_money(to_decimal(row.get("original_cost_eur") or 0)),
+        basis_adjustment_total_eur=round_money(to_decimal(row.get("cumulative_oekb_stepup_eur") or 0)),
         last_event_date=str(row.get("last_sale_date") or row.get("last_event_date") or ""),
         basis_method=str(row.get("austrian_basis_method") or row.get("basis_method") or ""),
         snapshot_date=str(row.get("snapshot_date") or ""),
@@ -522,23 +524,23 @@ def apply_event(states: dict[str, PositionState], event: PositionEvent) -> Event
         state.base_cost_total_eur = round_money(state.base_cost_total_eur - realized_base)
         state.basis_adjustment_total_eur = round_money(state.basis_adjustment_total_eur - realized_adjustment)
         if state.quantity == 0:
-            state.base_cost_total_eur = 0.0
-            state.basis_adjustment_total_eur = 0.0
+            state.base_cost_total_eur = Decimal("0")
+            state.basis_adjustment_total_eur = Decimal("0")
 
         sale_record = {
             "sale_date": event.event_date.isoformat(),
             "ticker": event.ticker,
             "isin": event.isin,
-            "quantity_sold": round_qty(event.quantity),
-            "sale_price_ccy": round_money(event.price_ccy or 0.0),
-            "sale_fx": round_money(event.fx_to_eur or 0.0),
-            "taxable_proceeds_eur": round_money(event.proceeds_eur),
-            "realized_base_cost_eur": realized_base,
-            "taxable_original_basis_eur": realized_base,
-            "realized_oekb_adjustment_eur": realized_adjustment,
-            "taxable_stepup_basis_eur": realized_adjustment,
-            "taxable_total_basis_eur": realized_basis,
-            "taxable_gain_loss_eur": round_money(event.proceeds_eur - realized_basis),
+            "quantity_sold": to_output_float(round_qty(event.quantity)),
+            "sale_price_ccy": to_output_float(round_money(event.price_ccy or 0)),
+            "sale_fx": to_output_float(round_money(event.fx_to_eur or 0)),
+            "taxable_proceeds_eur": to_output_float(round_money(event.proceeds_eur)),
+            "realized_base_cost_eur": to_output_float(realized_base),
+            "taxable_original_basis_eur": to_output_float(realized_base),
+            "realized_oekb_adjustment_eur": to_output_float(realized_adjustment),
+            "taxable_stepup_basis_eur": to_output_float(realized_adjustment),
+            "taxable_total_basis_eur": to_output_float(realized_basis),
+            "taxable_gain_loss_eur": to_output_float(round_money(event.proceeds_eur - realized_basis)),
             "notes": event.notes,
             "sale_trade_id": event.source_id,
         }
@@ -558,7 +560,7 @@ def apply_event(states: dict[str, PositionState], event: PositionEvent) -> Event
     elif event.event_type in {EVENT_TYPE_SPLIT, EVENT_TYPE_REVERSE_SPLIT}:
         if event.split_ratio in (None, 0):
             raise ValueError("Split event requires non-zero split_ratio")
-        state.quantity = round_qty(state.quantity * float(event.split_ratio))
+        state.quantity = round_qty(state.quantity * to_decimal(event.split_ratio))
     elif event.event_type == EVENT_TYPE_MANUAL_CORRECTION:
         state.quantity = round_qty(state.quantity + event.quantity_delta)
         state.base_cost_total_eur = round_money(state.base_cost_total_eur + event.base_cost_delta_eur)
@@ -586,23 +588,23 @@ def apply_event(states: dict[str, PositionState], event: PositionEvent) -> Event
         "source_id": event.source_id,
         "source_file": event.source_file,
         "sequence_key": event.sequence_key,
-        "quantity": round_qty(event.quantity),
-        "quantity_delta": round_qty(event.quantity_delta),
-        "price_ccy": round_money(event.price_ccy or 0.0) if event.price_ccy is not None else None,
-        "fx_to_eur": round_money(event.fx_to_eur or 0.0) if event.fx_to_eur is not None else None,
-        "proceeds_eur": round_money(event.proceeds_eur),
-        "base_cost_delta_eur": round_money(event.base_cost_delta_eur),
-        "basis_adjustment_delta_eur": round_money(event.basis_adjustment_delta_eur),
-        "realized_basis_eur": round_money(event.realized_basis_eur),
-        "realized_gain_loss_eur": round_money(event.realized_gain_loss_eur),
-        "realized_base_cost_eur": round_money(event.realized_base_cost_eur),
-        "realized_oekb_adjustment_eur": round_money(event.realized_oekb_adjustment_eur),
-        "split_ratio": float(event.split_ratio) if event.split_ratio is not None else None,
-        "quantity_after": round_qty(state.quantity),
-        "base_cost_total_eur_after": round_money(state.base_cost_total_eur),
-        "basis_adjustment_total_eur_after": round_money(state.basis_adjustment_total_eur),
-        "total_basis_eur_after": state.total_basis_eur,
-        "average_basis_eur_after": state.average_basis_eur,
+        "quantity": to_output_float(round_qty(event.quantity)),
+        "quantity_delta": to_output_float(round_qty(event.quantity_delta)),
+        "price_ccy": to_output_float(round_money(event.price_ccy or 0)) if event.price_ccy is not None else None,
+        "fx_to_eur": to_output_float(round_money(event.fx_to_eur or 0)) if event.fx_to_eur is not None else None,
+        "proceeds_eur": to_output_float(round_money(event.proceeds_eur)),
+        "base_cost_delta_eur": to_output_float(round_money(event.base_cost_delta_eur)),
+        "basis_adjustment_delta_eur": to_output_float(round_money(event.basis_adjustment_delta_eur)),
+        "realized_basis_eur": to_output_float(round_money(event.realized_basis_eur)),
+        "realized_gain_loss_eur": to_output_float(round_money(event.realized_gain_loss_eur)),
+        "realized_base_cost_eur": to_output_float(round_money(event.realized_base_cost_eur)),
+        "realized_oekb_adjustment_eur": to_output_float(round_money(event.realized_oekb_adjustment_eur)),
+        "split_ratio": to_output_float(event.split_ratio) if event.split_ratio is not None else None,
+        "quantity_after": to_output_float(round_qty(state.quantity)),
+        "base_cost_total_eur_after": to_output_float(round_money(state.base_cost_total_eur)),
+        "basis_adjustment_total_eur_after": to_output_float(round_money(state.basis_adjustment_total_eur)),
+        "total_basis_eur_after": to_output_float(state.total_basis_eur),
+        "average_basis_eur_after": to_output_float(state.average_basis_eur),
         "notes": event.notes,
     }
     return EventApplicationResult(event_record=event_record, sale_record=sale_record)

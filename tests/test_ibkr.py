@@ -137,10 +137,10 @@ def dividends_country_summary_df():
             Column.currency: ["USD", "USD", "EUR", "USD"],
             Column.profit_total: [41.53, 25.61, 7.6, 2.38],
             Column.dividends_euro_total: [39.7988, 23.3634, 7.6, 2.2493],
-            Column.dividends_euro_net_total: [28.8541, 16.9335, 5.51, 1.6307],
+            Column.dividends_euro_net_total: [28.8541, 16.9333, 5.51, 1.6307],
             Column.withholding_tax_euro_total: [0.0, 3.3471, 1.14, 0],
-            Column.kest_gross_total: [10.9446, 6.4249, 2.09, 0.6186],
-            Column.kest_net_total: [10.9446, 3.0828, 0.95, 0.6186],
+            Column.kest_gross_total: [10.9446, 6.4251, 2.09, 0.6186],
+            Column.kest_net_total: [10.9446, 3.083, 0.95, 0.6186],
         }
     )
 
@@ -153,10 +153,10 @@ def dividends_country_summary_no_etf_df():
             Column.currency: ["USD", "EUR", "USD"],
             Column.profit_total: [25.61, 7.6, 2.38],
             Column.dividends_euro_total: [23.3634, 7.6, 2.2493],
-            Column.dividends_euro_net_total: [16.9335, 5.51, 1.6307],
+            Column.dividends_euro_net_total: [16.9333, 5.51, 1.6307],
             Column.withholding_tax_euro_total: [3.3471, 1.14, 0],
-            Column.kest_gross_total: [6.4249, 2.09, 0.6186],
-            Column.kest_net_total: [3.0828, 0.95, 0.6186],
+            Column.kest_gross_total: [6.4251, 2.09, 0.6186],
+            Column.kest_net_total: [3.083, 0.95, 0.6186],
         }
     )
 
@@ -410,8 +410,8 @@ def test_calculate_summary_ibkr(dividends_country_summary_df, bonds_country_summ
             Column.profit_euro_total: [65.4115, 7.6, 375.2181],
             Column.profit_euro_net_total: [47.4183, 5.51, 272.0331],
             Column.withholding_tax_euro_total: [3.3471, 1.14, 0],
-            Column.kest_gross_total: [17.9881, 2.09, 103.185],
-            Column.kest_net_total: [14.646, 0.95, 103.185],
+                Column.kest_gross_total: [17.9883, 2.09, 103.185],
+                Column.kest_net_total: [14.6462, 0.95, 103.185],
         }
     ).sort("profit_total")
 
@@ -435,10 +435,10 @@ def test_calculate_summary_separate_etfs_ibkr(
             Column.currency: ["EUR", "USD", "USD", "USD"],
             Column.profit_total: [7.6, 27.99, 401.08, 41.53],
             Column.profit_euro_total: [7.6, 25.6127, 375.2181, 39.7987],
-            Column.profit_euro_net_total: [5.51, 18.5642, 272.0331, 28.8541],
+                Column.profit_euro_net_total: [5.51, 18.564, 272.0331, 28.8541],
             Column.withholding_tax_euro_total: [1.14, 3.3471, 0, 0.0],
-            Column.kest_gross_total: [2.09, 7.0435, 103.185, 10.9446],
-            Column.kest_net_total: [0.95, 3.7014, 103.185, 10.9446],
+                Column.kest_gross_total: [2.09, 7.0437, 103.185, 10.9446],
+                Column.kest_net_total: [0.95, 3.7016, 103.185, 10.9446],
         }
     ).sort(Column.currency)
 
