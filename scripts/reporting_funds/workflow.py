@@ -588,7 +588,7 @@ def _resolve_annual_10595_reports(
             payout_status = (
                 "resolved_later_year_annual_report"
                 if report.meldedatum.year > target_tax_year
-                else "resolved_later_year_annual_report"
+                else "resolved_same_year_annual_report"
             )
             resolution_note = (
                 "resolved by next-year annual 10595 back to prior payout year"

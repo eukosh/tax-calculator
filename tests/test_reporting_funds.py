@@ -2484,6 +2484,9 @@ def test_reporting_funds_workflow_uses_confirmed_cash_events_directly_for_annual
         resolution_cutoff_date="2026-04-30",
     )
 
+    payout_state_df = pl.read_csv(output_paths["payout_state"])
+    assert payout_state_df["status"].to_list() == ["resolved_later_year_annual_report", "resolved_later_year_annual_report"]
+
     income_df = pl.read_csv(output_paths["income_events"]).filter(pl.col("event_type") == "oekb_non_reported_distribution_10595")
 
     assert income_df["event_date"].to_list() == ["2025-04-02", "2025-07-02"]
