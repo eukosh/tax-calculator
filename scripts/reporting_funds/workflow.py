@@ -18,7 +18,6 @@ from scripts.reporting_funds.ibkr_source import (
 from scripts.reporting_funds.models import (
     BrokerDividendEvent,
     IbkrTrade,
-    Lot,
     OekbReport,
     PayoutStateRow,
     round_money,
@@ -26,8 +25,22 @@ from scripts.reporting_funds.models import (
 )
 from scripts.reporting_funds.oekb_csv import load_matching_oekb_reports, load_required_oekb_reports
 from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
-from src.currencies import ExchangeRates, ExchangeRatesCacheError
-from src.tax_lots import consume_fifo_sell
+from src.currencies import ExchangeRates
+from src.moving_average import (
+    EVENT_TYPE_AUSTRIAN_BASIS_RESET,
+    PositionState,
+    aggregate_state_rows,
+    apply_event,
+    build_basis_adjustment_event,
+    build_basis_reset_event,
+    build_buy_event,
+    build_sell_event,
+    clone_states,
+    load_position_states,
+    position_events_to_df,
+    position_states_to_df,
+    replay_events,
+)
 
 NEGATIVE_DEEMED_DISTRIBUTION_IGNORE = "ignore"
 NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL = "apply_full"
@@ -46,22 +59,15 @@ def build_fx_table(
     raw_exchange_rates_path: str | Path,
     currencies: tuple[str, ...],
 ) -> dict[str, tuple[list[date], list[float]]]:
-    try:
-        exchange_rates = ExchangeRates(
-            start_date=start_date,
-            end_date=end_date,
-            currencies=currencies,
-            overwrite=False,
-            raw_file_path=str(raw_exchange_rates_path),
-        )
-    except ExchangeRatesCacheError:
-        exchange_rates = ExchangeRates(
-            start_date=start_date,
-            end_date=end_date,
-            currencies=currencies,
-            overwrite=True,
-            raw_file_path=str(raw_exchange_rates_path),
-        )
+    raw_exchange_rates_path = Path(raw_exchange_rates_path)
+    overwrite_rates_cache = raw_exchange_rates_path == Path("data/input/currencies/raw_exchange_rates.csv")
+    exchange_rates = ExchangeRates(
+        start_date=start_date,
+        end_date=end_date,
+        currencies=currencies,
+        overwrite=overwrite_rates_cache,
+        raw_file_path=str(raw_exchange_rates_path),
+    )
 
     rates_df = exchange_rates.get_rates()
     fx_table: dict[str, tuple[list[date], list[float]]] = {}
@@ -93,106 +99,33 @@ def get_fx_rate(fx_table: dict[str, tuple[list[date], list[float]]], currency: s
     return float(available_rates[index])
 
 
-def build_buy_lot(trade: IbkrTrade, fx_table: dict[str, tuple[list[date], list[float]]]) -> Lot:
-    buy_fx = get_fx_rate(fx_table, trade.currency, trade.trade_date)
-    quantity = round_qty(trade.quantity)
-    original_cost_eur = round_money((quantity * trade.price_ccy) / buy_fx)
-    return Lot(
-        ticker=trade.ticker,
-        isin=trade.isin,
-        lot_id=f"{trade.ticker}:{trade.trade_date.isoformat()}:{trade.trade_id}",
-        buy_date=trade.trade_date,
-        original_quantity=quantity,
-        remaining_quantity=quantity,
-        currency=trade.currency,
-        buy_price_ccy=round_money(trade.price_ccy),
-        buy_fx_to_eur=round_money(buy_fx),
-        original_cost_eur=original_cost_eur,
-        account_id=trade.account_id,
-        source_trade_id=trade.trade_id,
-        source_statement_file=trade.source_statement_file,
-    )
+def load_state(path: str | Path) -> list[PositionState]:
+    return load_position_states(path)
 
 
-def load_ledger(path: str | Path) -> list[Lot]:
-    ledger_df = pl.read_csv(path)
-    lots: list[Lot] = []
-    for row in ledger_df.to_dicts():
-        lots.append(
-            Lot(
-                ticker=str(row["ticker"]),
-                isin=str(row["isin"]),
-                lot_id=str(row["lot_id"]),
-                buy_date=date.fromisoformat(str(row["buy_date"])),
-                original_quantity=round_qty(float(row["original_quantity"])),
-                remaining_quantity=round_qty(float(row["remaining_quantity"])),
-                currency=str(row["currency"]),
-                buy_price_ccy=round_money(float(row["buy_price_ccy"])),
-                buy_fx_to_eur=round_money(float(row["buy_fx_to_eur"])),
-                original_cost_eur=round_money(float(row["original_cost_eur"])),
-                cumulative_oekb_stepup_eur=round_money(float(row["cumulative_oekb_stepup_eur"])),
-                status=str(row.get("status") or "open"),
-                broker=str(row.get("broker") or "ibkr"),
-                account_id=str(row.get("account_id") or ""),
-                notes=str(row.get("notes") or ""),
-                last_adjustment_year=str(row.get("last_adjustment_year") or ""),
-                last_adjustment_reference=str(row.get("last_adjustment_reference") or ""),
-                last_sale_date=str(row.get("last_sale_date") or ""),
-                sold_quantity_ytd=round_qty(float(row.get("sold_quantity_ytd") or 0.0)),
-                source_trade_id=str(row.get("source_trade_id") or ""),
-                source_statement_file=str(row.get("source_statement_file") or ""),
-            )
-        )
-    return lots
-
-
-def load_opening_lot_snapshot(path: str | Path, *, allowed_asset_classes: set[str] | None = None) -> tuple[list[Lot], date]:
+def load_opening_state_snapshot(
+    path: str | Path,
+    *,
+    allowed_asset_classes: set[str] | None = None,
+) -> tuple[list[PositionState], date]:
     snapshot_df = pl.read_csv(path)
     if snapshot_df.is_empty():
-        raise ValueError(f"Opening lot snapshot is empty: {path}")
+        raise ValueError(f"Opening state snapshot is empty: {path}")
     if "snapshot_date" not in snapshot_df.columns:
-        raise ValueError(f"Opening lot snapshot is missing required column 'snapshot_date': {path}")
+        raise ValueError(f"Opening state snapshot is missing required column 'snapshot_date': {path}")
 
     snapshot_dates = {date.fromisoformat(str(value)) for value in snapshot_df["snapshot_date"].to_list()}
     if len(snapshot_dates) != 1:
         raise ValueError(
-            f"Opening lot snapshot must contain exactly one snapshot_date value, found {len(snapshot_dates)} in {path}"
+            f"Opening state snapshot must contain exactly one snapshot_date value, found {len(snapshot_dates)} in {path}"
         )
     snapshot_date = next(iter(snapshot_dates))
 
     if allowed_asset_classes is not None and "asset_class" in snapshot_df.columns:
         snapshot_df = snapshot_df.filter(pl.col("asset_class").is_in(sorted(allowed_asset_classes)))
     if snapshot_df.is_empty():
-        raise ValueError(f"Opening lot snapshot contains no matching lots after asset-class filtering: {path}")
-
-    lots: list[Lot] = []
-    for row in snapshot_df.to_dicts():
-        lots.append(
-            Lot(
-                ticker=str(row["ticker"]),
-                isin=str(row["isin"]),
-                lot_id=str(row["lot_id"]),
-                buy_date=date.fromisoformat(str(row["buy_date"])),
-                original_quantity=round_qty(float(row["original_quantity"])),
-                remaining_quantity=round_qty(float(row["remaining_quantity"])),
-                currency=str(row["currency"]),
-                buy_price_ccy=round_money(float(row["buy_price_ccy"])),
-                buy_fx_to_eur=round_money(float(row["buy_fx_to_eur"])),
-                original_cost_eur=round_money(float(row["original_cost_eur"])),
-                cumulative_oekb_stepup_eur=round_money(float(row.get("cumulative_oekb_stepup_eur") or 0.0)),
-                status=str(row.get("status") or "open"),
-                broker=str(row.get("broker") or "ibkr"),
-                account_id=str(row.get("account_id") or ""),
-                notes=str(row.get("notes") or ""),
-                last_adjustment_year=str(row.get("last_adjustment_year") or ""),
-                last_adjustment_reference=str(row.get("last_adjustment_reference") or ""),
-                last_sale_date=str(row.get("last_sale_date") or ""),
-                sold_quantity_ytd=round_qty(float(row.get("sold_quantity_ytd") or 0.0)),
-                source_trade_id=str(row.get("source_trade_id") or ""),
-                source_statement_file=str(row.get("source_statement_file") or ""),
-            )
-        )
-    return lots, snapshot_date
+        raise ValueError(f"Opening state snapshot contains no matching rows after asset-class filtering: {path}")
+    return aggregate_state_rows(snapshot_df.to_dicts()), snapshot_date
 
 
 def load_payout_state(path: str | Path) -> dict[str, PayoutStateRow]:
@@ -257,123 +190,146 @@ def payout_state_to_df(rows: list[PayoutStateRow]) -> pl.DataFrame:
     return pl.DataFrame([row.to_record() for row in rows]).sort(["ticker", "pay_date", "payout_key"])
 
 
-def prepare_lots_for_new_year(lots: list[Lot]) -> list[Lot]:
-    prepared_lots = deepcopy(lots)
-    for lot in prepared_lots:
-        lot.sold_quantity_ytd = 0.0
-    return prepared_lots
+def prepare_positions_for_new_year(positions: list[PositionState]) -> list[PositionState]:
+    return list(clone_states(positions).values())
 
 
-def _apply_sell(
-    lots: list[Lot],
-    trade: IbkrTrade,
-    fx_table: dict[str, tuple[list[date], list[float]]],
-    sale_rows: list[dict[str, object]] | None,
-    track_ytd: bool,
+def _apply_position_event(
+    positions: list[PositionState],
+    event,
+    *,
+    event_rows: list[dict[str, object]] | None = None,
+    sale_rows: list[dict[str, object]] | None = None,
 ) -> None:
-    sale_fx = get_fx_rate(fx_table, trade.currency, trade.trade_date)
-    allocations = consume_fifo_sell(
-        lots,
-        trade,
-        sale_fx=sale_fx,
-        track_ytd=track_ytd,
-    )
-    if sale_rows is None:
-        return
-    for allocation in allocations:
-        sale_rows.append(
-            {
-                "sale_date": allocation["sale_date"],
-                "ticker": allocation["ticker"],
-                "isin": allocation["isin"],
-                "quantity_sold": allocation["quantity_sold"],
-                "sale_price_ccy": allocation["sale_price_ccy"],
-                "sale_fx": allocation["sale_fx"],
-                "lot_id": allocation["lot_id"],
-                "lot_buy_date": allocation["lot_buy_date"],
-                "quantity_from_lot": allocation["quantity_from_lot"],
-                "taxable_proceeds_eur": allocation["taxable_proceeds_eur"],
-                "taxable_original_basis_eur": allocation["taxable_original_basis_eur"],
-                "taxable_stepup_basis_eur": allocation["taxable_stepup_basis_eur"],
-                "taxable_total_basis_eur": allocation["taxable_total_basis_eur"],
-                "taxable_gain_loss_eur": allocation["taxable_gain_loss_eur"],
-                "notes": "FIFO sale result uses original EUR basis plus cumulative OeKB acquisition-cost corrections.",
-            }
-        )
+    state_map = clone_states(positions)
+    result = apply_event(state_map, event)
+    positions[:] = sorted(state_map.values(), key=lambda item: (item.asset_class, item.ticker, item.isin))
+    if event_rows is not None:
+        event_rows.append(result.event_record)
+    if sale_rows is not None and result.sale_record is not None:
+        sale_rows.append(result.sale_record)
 
 
 def apply_trade(
-    lots: list[Lot],
+    positions: list[PositionState],
     trade: IbkrTrade,
     fx_table: dict[str, tuple[list[date], list[float]]],
     sale_rows: list[dict[str, object]] | None = None,
-    track_ytd: bool = True,
+    *,
+    event_rows: list[dict[str, object]] | None = None,
+    sequence_key: int = 0,
 ) -> None:
+    trade_fx = get_fx_rate(fx_table, trade.currency, trade.trade_date)
     if trade.operation == "buy":
-        lots.append(build_buy_lot(trade, fx_table))
-        return
-    _apply_sell(lots, trade, fx_table, sale_rows=sale_rows, track_ytd=track_ytd)
+        event = build_buy_event(
+            broker="ibkr",
+            ticker=trade.ticker,
+            isin=trade.isin,
+            currency=trade.currency,
+            asset_class="ETF",
+            trade_date=trade.trade_date,
+            quantity=trade.quantity,
+            price_ccy=trade.price_ccy,
+            fx_to_eur=trade_fx,
+            source_id=trade.trade_id,
+            source_file=trade.source_statement_file,
+            sequence_key=sequence_key,
+        )
+    else:
+        event = build_sell_event(
+            broker="ibkr",
+            ticker=trade.ticker,
+            isin=trade.isin,
+            currency=trade.currency,
+            asset_class="ETF",
+            trade_date=trade.trade_date,
+            quantity=trade.quantity,
+            price_ccy=trade.price_ccy,
+            fx_to_eur=trade_fx,
+            source_id=trade.trade_id,
+            source_file=trade.source_statement_file,
+            notes="Moving-average ETF sale result uses Austrian EUR basis plus cumulative OeKB acquisition-cost corrections.",
+            sequence_key=sequence_key,
+        )
+    _apply_position_event(positions, event, event_rows=event_rows, sale_rows=sale_rows)
 
 
-def _eligible_lots(lots: list[Lot], isin: str, eligibility_date: date) -> list[Lot]:
-    return [lot for lot in lots if lot.isin == isin and lot.remaining_quantity > 0 and lot.buy_date <= eligibility_date]
+def _eligible_positions(positions: list[PositionState], isin: str, eligibility_date: date) -> list[PositionState]:
+    del eligibility_date
+    return [position for position in positions if position.isin == isin and position.quantity > 0]
 
 
-def _sum_shares(lots: list[Lot]) -> float:
-    return round_qty(sum(lot.remaining_quantity for lot in lots))
+def _sum_shares(positions: list[PositionState]) -> float:
+    return round_qty(sum(position.quantity for position in positions))
 
 
-def _ensure_lot_compatibility(lots: list[Lot], report: OekbReport) -> None:
+def _ensure_position_compatibility(positions: list[PositionState], report: OekbReport) -> None:
     # OeKB report currency can differ from the broker trade currency for the same ETF ISIN.
     # Austrian ETF tax rows and basis corrections are converted to EUR from the OeKB report currency,
-    # while buy lots already store their basis in EUR. Therefore a currency mismatch between lot.trade
+    # while existing position state already stores basis in EUR. Therefore a currency mismatch between broker trade
     # currency and OeKB report currency is not, by itself, an incompatibility.
+    del positions, report
     return None
 
 
 def apply_basis_correction(
-    lots: list[Lot],
+    positions: list[PositionState],
     report: OekbReport,
     tax_year: int,
     fx_table: dict[str, tuple[list[date], list[float]]],
     *,
     quantity_override: float | None = None,
     note_prefix: str = "",
+    event_rows: list[dict[str, object]] | None = None,
+    sequence_key_start: int = 0,
 ) -> dict[str, object]:
     if report.is_ausschuettungsmeldung and not (report.ex_tag or report.ausschuettungstag):
         raise ValueError(f"OeKB distribution report for {report.ticker} is missing both Ex-Tag and Ausschüttungstag")
 
     eligibility_date = report.eligibility_date
     effective_date = report.ausschuettungstag or report.meldedatum
-    eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
-    _ensure_lot_compatibility(eligible_lots, report)
+    eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
+    _ensure_position_compatibility(eligible_positions, report)
 
-    shares_held = _sum_shares(eligible_lots) if quantity_override is None else round_qty(quantity_override)
+    shares_held = _sum_shares(eligible_positions) if quantity_override is None else round_qty(quantity_override)
     fx_to_eur = get_fx_rate(fx_table, report.currency, effective_date)
     basis_stepup_total_ccy = round_money(report.acquisition_cost_correction_per_share_ccy * shares_held)
     basis_stepup_total_eur = round_money(basis_stepup_total_ccy / fx_to_eur)
 
     allocated_total = 0.0
-    for index, lot in enumerate(eligible_lots):
-        if shares_held == 0 or not eligible_lots:
+    for index, position in enumerate(eligible_positions):
+        if shares_held == 0 or not eligible_positions:
             stepup_eur = 0.0
-        elif index == len(eligible_lots) - 1:
+        elif index == len(eligible_positions) - 1:
             stepup_eur = round_money(basis_stepup_total_eur - allocated_total)
         else:
-            total_remaining_quantity = _sum_shares(eligible_lots)
+            total_remaining_quantity = _sum_shares(eligible_positions)
             if total_remaining_quantity == 0:
                 stepup_eur = 0.0
             else:
-                stepup_eur = round_money(basis_stepup_total_eur * (lot.remaining_quantity / total_remaining_quantity))
+                stepup_eur = round_money(basis_stepup_total_eur * (position.quantity / total_remaining_quantity))
             allocated_total += stepup_eur
 
-        lot.cumulative_oekb_stepup_eur = round_money(lot.cumulative_oekb_stepup_eur + stepup_eur)
-        lot.last_adjustment_year = str(tax_year)
-        lot.last_adjustment_reference = f"{report.ticker}:{effective_date.isoformat()}:10289"
-        lot.add_note(
-            f"{note_prefix}{tax_year} OeKB basis correction on {effective_date.isoformat()} "
-            f"(eligible {eligibility_date.isoformat()}, delta {stepup_eur:.6f} EUR)"
-        )
+        if stepup_eur != 0.0:
+            event = build_basis_adjustment_event(
+                broker=position.broker,
+                ticker=position.ticker,
+                isin=position.isin,
+                currency=position.currency,
+                asset_class=position.asset_class or "ETF",
+                eligibility_date=eligibility_date,
+                effective_date=effective_date,
+                basis_adjustment_eur=stepup_eur,
+                quantity=position.quantity,
+                source_id=f"{report.ticker}:{effective_date.isoformat()}:10289",
+                source_file=report.source_file,
+                notes=(
+                    f"{note_prefix}{tax_year} OeKB basis correction on {effective_date.isoformat()} "
+                    f"(eligible {eligibility_date.isoformat()}, delta {stepup_eur:.6f} EUR)"
+                ),
+                sequence_key=sequence_key_start + index,
+            )
+            _apply_position_event(positions, event, event_rows=event_rows)
 
     return {
         "tax_year": tax_year,
@@ -565,9 +521,10 @@ def _resolve_annual_10595_reports(
     annual_reports: list[OekbReport],
     *,
     target_tax_year: int,
-    lots_for_quantity: list[Lot],
+    positions_for_quantity: list[PositionState],
     fx_table: dict[str, tuple[list[date], list[float]]],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    del positions_for_quantity
     income_rows: list[dict[str, object]] = []
     resolution_rows: list[dict[str, object]] = []
 
@@ -672,6 +629,8 @@ def _resolve_annual_10595_reports(
                     ),
                     "creditable_foreign_tax_total_ccy": 0.0,
                     "creditable_foreign_tax_total_eur": 0.0,
+                    "domestic_dividend_kest_total_ccy": 0.0,
+                    "domestic_dividend_kest_total_eur": 0.0,
                     "broker_gross_amount_ccy": round_money(payout.broker_gross_amount_ccy),
                     "broker_net_amount_ccy": round_money(payout.broker_net_amount_ccy),
                     "broker_tax_amount_ccy": round_money(payout.broker_tax_amount_ccy),
@@ -769,6 +728,8 @@ def _build_broker_dividend_row(event: BrokerDividendEvent, fx_table: dict[str, t
         "amount_total_eur": round_money(gross_amount_ccy / fx_to_eur),
         "creditable_foreign_tax_total_ccy": 0.0,
         "creditable_foreign_tax_total_eur": 0.0,
+        "domestic_dividend_kest_total_ccy": 0.0,
+        "domestic_dividend_kest_total_eur": 0.0,
         "broker_gross_amount_ccy": gross_amount_ccy,
         "broker_net_amount_ccy": net_amount_ccy,
         "broker_tax_amount_ccy": tax_ccy,
@@ -828,7 +789,7 @@ def _has_confirmed_distribution_match(report: OekbReport, broker_events: list[Br
         for event in broker_events
     )
 def build_income_rows_for_report(
-    lots: list[Lot],
+    positions: list[PositionState],
     report: OekbReport,
     tax_year: int,
     fx_table: dict[str, tuple[list[date], list[float]]],
@@ -850,6 +811,7 @@ def build_income_rows_for_report(
         amount_total_ccy: float,
         creditable_foreign_tax_per_share_ccy: float = 0.0,
         creditable_foreign_tax_total_ccy: float = 0.0,
+        domestic_dividend_kest_total_ccy: float = 0.0,
         matched_broker_event_id: str = "",
         notes: str = "",
     ) -> None:
@@ -869,6 +831,8 @@ def build_income_rows_for_report(
                 "amount_total_eur": round_money(amount_total_ccy / fx_to_eur),
                 "creditable_foreign_tax_total_ccy": round_money(creditable_foreign_tax_total_ccy),
                 "creditable_foreign_tax_total_eur": round_money(creditable_foreign_tax_total_ccy / fx_to_eur),
+                "domestic_dividend_kest_total_ccy": round_money(domestic_dividend_kest_total_ccy),
+                "domestic_dividend_kest_total_eur": round_money(domestic_dividend_kest_total_ccy / fx_to_eur),
                 "broker_gross_amount_ccy": 0.0,
                 "broker_net_amount_ccy": 0.0,
                 "broker_tax_amount_ccy": 0.0,
@@ -891,9 +855,9 @@ def build_income_rows_for_report(
 
     if report.reported_distribution_per_share_ccy != 0.0:
         event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
-        eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
-        _ensure_lot_compatibility(eligible_lots, report)
-        quantity = _sum_shares(eligible_lots)
+        eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
+        _ensure_position_compatibility(eligible_positions, report)
+        quantity = _sum_shares(eligible_positions)
         add_row(
             event_type="oekb_reported_distribution_10286",
             event_date=event_date,
@@ -907,9 +871,9 @@ def build_income_rows_for_report(
 
     if report.age_per_share_ccy != 0.0:
         event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
-        eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
-        _ensure_lot_compatibility(eligible_lots, report)
-        quantity = _sum_shares(eligible_lots) if quantity_override is None else round_qty(quantity_override)
+        eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
+        _ensure_position_compatibility(eligible_positions, report)
+        quantity = _sum_shares(eligible_positions) if quantity_override is None else round_qty(quantity_override)
         add_row(
             event_type="oekb_deemed_distribution_10287",
             event_date=event_date,
@@ -927,9 +891,9 @@ def build_income_rows_for_report(
 
     if report.creditable_foreign_tax_per_share_ccy != 0.0:
         event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
-        eligible_lots = _eligible_lots(lots, report.isin, eligibility_date)
-        _ensure_lot_compatibility(eligible_lots, report)
-        quantity = _sum_shares(eligible_lots) if quantity_override is None else round_qty(quantity_override)
+        eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
+        _ensure_position_compatibility(eligible_positions, report)
+        quantity = _sum_shares(eligible_positions) if quantity_override is None else round_qty(quantity_override)
         credit_total_ccy = round_money(report.creditable_foreign_tax_per_share_ccy * quantity)
         add_row(
             event_type="oekb_creditable_foreign_tax_10288",
@@ -948,37 +912,53 @@ def build_income_rows_for_report(
             ).strip(),
         )
 
+    if report.domestic_dividends_loss_offset_per_share_ccy != 0.0:
+        event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
+        eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
+        _ensure_position_compatibility(eligible_positions, report)
+        quantity = _sum_shares(eligible_positions) if quantity_override is None else round_qty(quantity_override)
+        add_row(
+            event_type="oekb_domestic_dividends_10759",
+            event_date=event_date,
+            eligibility_date=eligibility_date,
+            quantity=quantity,
+            amount_per_share_ccy=report.domestic_dividends_loss_offset_per_share_ccy,
+            amount_total_ccy=round_money(report.domestic_dividends_loss_offset_per_share_ccy * quantity),
+            matched_broker_event_id=matched_broker_event_id,
+            notes=(
+                f"{note_prefix}"
+                f"{'Distribution-report' if report.is_ausschuettungsmeldung else 'Annual'} "
+                "domestic dividends eligible for loss offset from OeKB report."
+            ).strip(),
+        )
+
+    if report.domestic_dividend_kest_per_share_ccy != 0.0:
+        event_date, eligibility_date, matched_broker_event_id = resolve_report_event_timing()
+        eligible_positions = _eligible_positions(positions, report.isin, eligibility_date)
+        _ensure_position_compatibility(eligible_positions, report)
+        quantity = _sum_shares(eligible_positions) if quantity_override is None else round_qty(quantity_override)
+        domestic_kest_total_ccy = round_money(report.domestic_dividend_kest_per_share_ccy * quantity)
+        add_row(
+            event_type="oekb_domestic_dividend_kest_10760",
+            event_date=event_date,
+            eligibility_date=eligibility_date,
+            quantity=quantity,
+            amount_per_share_ccy=0.0,
+            amount_total_ccy=0.0,
+            domestic_dividend_kest_total_ccy=domestic_kest_total_ccy,
+            matched_broker_event_id=matched_broker_event_id,
+            notes=(
+                f"{note_prefix}"
+                f"{'Distribution-report' if report.is_ausschuettungsmeldung else 'Annual'} "
+                "Austrian KESt on domestic dividends from OeKB report."
+            ).strip(),
+        )
+
     return rows
 
 
-def lots_to_df(lots: list[Lot]) -> pl.DataFrame:
-    schema = {
-        "ticker": pl.String,
-        "isin": pl.String,
-        "lot_id": pl.String,
-        "buy_date": pl.String,
-        "original_quantity": pl.Float64,
-        "remaining_quantity": pl.Float64,
-        "currency": pl.String,
-        "buy_price_ccy": pl.Float64,
-        "buy_fx_to_eur": pl.Float64,
-        "original_cost_eur": pl.Float64,
-        "cumulative_oekb_stepup_eur": pl.Float64,
-        "adjusted_basis_eur": pl.Float64,
-        "status": pl.String,
-        "broker": pl.String,
-        "account_id": pl.String,
-        "notes": pl.String,
-        "last_adjustment_year": pl.String,
-        "last_adjustment_reference": pl.String,
-        "last_sale_date": pl.String,
-        "sold_quantity_ytd": pl.Float64,
-        "source_trade_id": pl.String,
-        "source_statement_file": pl.String,
-    }
-    if not lots:
-        return pl.DataFrame(schema=schema)
-    return pl.DataFrame([lot.to_record() for lot in lots]).sort(["ticker", "buy_date", "lot_id"])
+def positions_to_df(positions: list[PositionState]) -> pl.DataFrame:
+    return position_states_to_df(positions)
 
 
 def basis_adjustments_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
@@ -1018,6 +998,8 @@ def income_events_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
         "amount_total_eur": pl.Float64,
         "creditable_foreign_tax_total_ccy": pl.Float64,
         "creditable_foreign_tax_total_eur": pl.Float64,
+        "domestic_dividend_kest_total_ccy": pl.Float64,
+        "domestic_dividend_kest_total_eur": pl.Float64,
         "broker_gross_amount_ccy": pl.Float64,
         "broker_net_amount_ccy": pl.Float64,
         "broker_tax_amount_ccy": pl.Float64,
@@ -1121,6 +1103,10 @@ def payout_evidence_review_to_df(rows: list[PayoutStateRow], tax_year: int) -> p
     return pl.DataFrame(review_rows).sort(["ticker", "pay_date", "payout_key"])
 
 
+def position_event_log_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
+    return position_events_to_df(rows)
+
+
 def sales_to_df(sale_rows: list[dict[str, object]]) -> pl.DataFrame:
     schema = {
         "sale_date": pl.String,
@@ -1129,19 +1115,17 @@ def sales_to_df(sale_rows: list[dict[str, object]]) -> pl.DataFrame:
         "quantity_sold": pl.Float64,
         "sale_price_ccy": pl.Float64,
         "sale_fx": pl.Float64,
-        "lot_id": pl.String,
-        "lot_buy_date": pl.String,
-        "quantity_from_lot": pl.Float64,
         "taxable_proceeds_eur": pl.Float64,
-        "taxable_original_basis_eur": pl.Float64,
-        "taxable_stepup_basis_eur": pl.Float64,
+        "realized_base_cost_eur": pl.Float64,
+        "realized_oekb_adjustment_eur": pl.Float64,
         "taxable_total_basis_eur": pl.Float64,
         "taxable_gain_loss_eur": pl.Float64,
+        "sale_trade_id": pl.String,
         "notes": pl.String,
     }
     if not sale_rows:
         return pl.DataFrame(schema=schema)
-    return pl.DataFrame(sale_rows).sort(["ticker", "sale_date", "lot_buy_date", "lot_id"])
+    return pl.DataFrame(sale_rows).sort(["ticker", "sale_date", "sale_trade_id"])
 
 
 def write_csv(df: pl.DataFrame, output_path: Path) -> None:
@@ -1152,10 +1136,10 @@ def write_csv(df: pl.DataFrame, output_path: Path) -> None:
 def write_summary(
     summary_path: Path,
     tax_year: int,
-    next_period_ledger_path: Path,
+    next_period_state_path: Path,
     next_period_payout_state_path: Path,
     next_period_negative_override_path: Path,
-    ledger_df: pl.DataFrame,
+    state_df: pl.DataFrame,
     income_events_df: pl.DataFrame,
     basis_adjustments_df: pl.DataFrame,
     sales_df: pl.DataFrame,
@@ -1170,6 +1154,9 @@ def write_summary(
     income_total_eur = income_events_df["amount_total_eur"].sum() if income_events_df.height else 0.0
     foreign_tax_total_eur = (
         income_events_df["creditable_foreign_tax_total_eur"].sum() if income_events_df.height else 0.0
+    )
+    domestic_dividend_kest_total_eur = (
+        income_events_df["domestic_dividend_kest_total_eur"].sum() if income_events_df.height else 0.0
     )
     basis_total_eur = basis_adjustments_df["basis_stepup_total_eur"].sum() if basis_adjustments_df.height else 0.0
     sales_total_eur = sales_df["taxable_gain_loss_eur"].sum() if sales_df.height else 0.0
@@ -1228,12 +1215,25 @@ def write_summary(
         if income_events_df.height
         else 0.0
     )
+    filing_domestic_dividends_loss_offset_total_eur = (
+        income_events_df.filter(pl.col("event_type") == "oekb_domestic_dividends_10759")["amount_total_eur"].sum()
+        if income_events_df.height
+        else 0.0
+    )
+    filing_domestic_dividend_kest_total_eur = (
+        income_events_df.filter(pl.col("event_type") == "oekb_domestic_dividend_kest_10760")[
+            "domestic_dividend_kest_total_eur"
+        ].sum()
+        if income_events_df.height
+        else 0.0
+    )
 
     income_lines = [
         (
             f"- `{row['event_type']}` `{row['ticker']}` @ `{row['event_date']}`: "
             f"amount `{row['amount_total_eur']:.6f} EUR`, "
-            f"creditable foreign tax `{row['creditable_foreign_tax_total_eur']:.6f} EUR`"
+            f"creditable foreign tax `{row['creditable_foreign_tax_total_eur']:.6f} EUR`, "
+            f"domestic dividend KESt `{row['domestic_dividend_kest_total_eur']:.6f} EUR`"
         )
         for row in income_events_df.to_dicts()
         if row["event_type"] != "broker_dividend_event"
@@ -1245,7 +1245,7 @@ def write_summary(
         filing_lines = [
             f"- authoritative processing starts at `{scope_label}`",
             "- this run is carryforward-only and is not a filing-preparation output for the target year",
-            "- OeKB `10289` basis corrections are applied to seed the next Austrian ETF ledger state",
+            "- OeKB `10289` basis corrections are applied to seed the next Austrian ETF state",
             "- OeKB income classifications are intentionally not emitted as filing rows in carryforward-only mode",
         ]
         income_heading = f"## {tax_year} Diagnostic Broker Cash Evidence"
@@ -1259,6 +1259,14 @@ def write_summary(
                 f"- `Ausschüttungsgleiche Erträge 27.5%`: `{filing_deemed_distribution_total_eur:.6f} EUR`"
             ),
             (
+                f"- `Domestic dividends in loss offset (KZ 189)`: "
+                f"`{filing_domestic_dividends_loss_offset_total_eur:.6f} EUR`"
+            ),
+            (
+                f"- `Austrian KESt on domestic dividends (KZ 899)`: "
+                f"`{filing_domestic_dividend_kest_total_eur:.6f} EUR`"
+            ),
+            (
                 f"- `Creditable foreign tax`: `{filing_creditable_foreign_tax_total_eur:.6f} EUR`"
             ),
             (
@@ -1269,6 +1277,12 @@ def write_summary(
                 "- `Ausschüttungsgleiche Erträge 27.5%` is the subtotal of OeKB `10287` rows"
             ),
             (
+                "- `Domestic dividends in loss offset (KZ 189)` is the subtotal of OeKB `10759` rows"
+            ),
+            (
+                "- `Austrian KESt on domestic dividends (KZ 899)` is the subtotal of OeKB `10760` rows"
+            ),
+            (
                 "- accrual-only or realized-without-cash payout rows are deferred until broker cash is actually confirmed"
             ),
             (
@@ -1276,6 +1290,9 @@ def write_summary(
             ),
             (
                 "- basis corrections from `10289` are not entered separately in E1kv; they only adjust future sale basis"
+            ),
+            (
+                "- `10759` and `10760` are separate filing fields and do not modify `10286`, `10287`, `10595`, or `10288`"
             ),
         ]
         income_heading = f"## {tax_year} ETF Income Events"
@@ -1290,33 +1307,33 @@ def write_summary(
     ] or ["- no ETF basis corrections were applied"]
 
     open_lot_lines = []
-    if ledger_df.height:
-        open_lots_df = ledger_df.filter(pl.col("remaining_quantity") > 0)
+    if state_df.height:
+        open_lots_df = state_df.filter(pl.col("quantity") > 0)
         for row in (
             open_lots_df.group_by("ticker")
             .agg(
-                pl.len().alias("lot_count"),
-                pl.sum("remaining_quantity").alias("remaining_quantity"),
-                pl.sum("original_cost_eur").alias("original_cost_eur"),
-                pl.sum("cumulative_oekb_stepup_eur").alias("cumulative_oekb_stepup_eur"),
-                pl.sum("adjusted_basis_eur").alias("adjusted_basis_eur"),
+                pl.len().alias("position_count"),
+                pl.sum("quantity").alias("quantity"),
+                pl.sum("base_cost_total_eur").alias("base_cost_total_eur"),
+                pl.sum("basis_adjustment_total_eur").alias("basis_adjustment_total_eur"),
+                pl.sum("total_basis_eur").alias("total_basis_eur"),
             )
             .sort("ticker")
             .to_dicts()
         ):
             open_lot_lines.append(
-                f"- `{row['ticker']}`: open lots `{row['lot_count']}`, open quantity `{row['remaining_quantity']}`, "
-                f"original basis `{row['original_cost_eur']:.6f} EUR`, "
-                f"OeKB basis adjustment `{row['cumulative_oekb_stepup_eur']:.6f} EUR`, "
-                f"adjusted basis `{row['adjusted_basis_eur']:.6f} EUR`"
+                f"- `{row['ticker']}`: open positions `{row['position_count']}`, open quantity `{row['quantity']}`, "
+                f"base cost `{row['base_cost_total_eur']:.6f} EUR`, "
+                f"OeKB basis adjustment `{row['basis_adjustment_total_eur']:.6f} EUR`, "
+                f"total basis `{row['total_basis_eur']:.6f} EUR`"
             )
     if not open_lot_lines:
-        open_lot_lines = ["- no open reporting-fund lots remain"]
+        open_lot_lines = ["- no open reporting-fund positions remain"]
 
     next_period_lines = [
         (
-            f"- opening lot ledger for `{tax_year + 1}`: "
-            f"`{next_period_ledger_path.as_posix()}`"
+            f"- opening ETF tax state for `{tax_year + 1}`: "
+            f"`{next_period_state_path.as_posix()}`"
         ),
         (
             f"- payout resolution carryforward state for `{tax_year + 1}`: "
@@ -1352,13 +1369,14 @@ def write_summary(
                 *income_lines,
                 f"- `diagnostic_total_income_eur`: `{income_total_eur:.6f} EUR`",
                 f"- `diagnostic_total_creditable_foreign_tax_eur`: `{foreign_tax_total_eur:.6f} EUR`",
+                f"- `diagnostic_total_domestic_dividend_kest_eur`: `{domestic_dividend_kest_total_eur:.6f} EUR`",
                 "- diagnostic totals are workflow totals, not direct filing fields",
                 "",
                 "## Basis Adjustments",
                 *basis_lines,
                 f"- `total_basis_adjustment_eur`: `{basis_total_eur:.6f} EUR`",
                 "",
-                "## Ledger State",
+                "## Position State",
                 *open_lot_lines,
                 "",
                 "## Sales",
@@ -1386,13 +1404,13 @@ def write_summary(
 
 def _determine_required_isins(
     tax_year: int,
-    previous_lots: list[Lot],
+    previous_positions: list[PositionState],
     all_trades: list[IbkrTrade],
     has_opening_state: bool,
 ) -> set[str]:
     current_year_trades = {trade.isin for trade in all_trades if trade.trade_date.year == tax_year}
     if has_opening_state:
-        previous_open_isins = {lot.isin for lot in previous_lots if lot.remaining_quantity > 0}
+        previous_open_isins = {position.isin for position in previous_positions if position.quantity > 0}
         return current_year_trades | previous_open_isins
 
     quantity_by_isin: dict[str, float] = defaultdict(float)
@@ -1412,7 +1430,7 @@ def _resolve_fx_bounds(
     current_year_trades: list[IbkrTrade],
     reports: list[OekbReport],
     broker_events: list[BrokerDividendEvent],
-    has_previous_ledger: bool,
+    has_previous_state: bool,
 ) -> tuple[date, date]:
     relevant_dates: list[date] = []
     relevant_dates.extend(trade.trade_date for trade in current_year_trades)
@@ -1421,7 +1439,7 @@ def _resolve_fx_bounds(
     relevant_dates.extend((report.payout_date or report.meldedatum) for report in reports)
     relevant_dates.extend(event.pay_date for event in broker_events)
     relevant_dates.extend(event.ex_date for event in broker_events if event.ex_date is not None)
-    if not has_previous_ledger:
+    if not has_previous_state:
         relevant_dates.extend(trade.trade_date for trade in opening_trades)
 
     if not relevant_dates:
@@ -1551,14 +1569,14 @@ def _parse_override_quantity(raw_value: str, report_key: str) -> float | None:
 
 def _resolve_negative_deemed_distribution_review(
     report: OekbReport,
-    lots: list[Lot],
+    positions: list[PositionState],
     broker_events: list[BrokerDividendEvent],
     overrides: dict[str, dict[str, str]],
 ) -> dict[str, object]:
     report_key = _negative_report_key(report)
-    eligible_lots = _eligible_lots(lots, report.isin, report.meldedatum)
-    _ensure_lot_compatibility(eligible_lots, report)
-    quantity_held_on_report_date = _sum_shares(eligible_lots)
+    eligible_positions = _eligible_positions(positions, report.isin, report.meldedatum)
+    _ensure_position_compatibility(eligible_positions, report)
+    quantity_held_on_report_date = _sum_shares(eligible_positions)
     candidate_payouts = _candidate_negative_report_payouts(report, broker_events)
     matched_payouts, target_distribution_per_share = _reconcile_negative_report_payout_subset(report, candidate_payouts)
 
@@ -1662,10 +1680,14 @@ def _resolve_negative_deemed_distribution_review(
     }
 
 
-def _build_ticker_by_isin(previous_lots: list[Lot], all_trades: list[IbkrTrade], broker_events: list[BrokerDividendEvent]) -> dict[str, str]:
+def _build_ticker_by_isin(
+    previous_positions: list[PositionState],
+    all_trades: list[IbkrTrade],
+    broker_events: list[BrokerDividendEvent],
+) -> dict[str, str]:
     mapping: dict[str, str] = {}
-    for lot in previous_lots:
-        mapping.setdefault(lot.isin, lot.ticker)
+    for position in previous_positions:
+        mapping.setdefault(position.isin, position.ticker)
     for trade in all_trades:
         mapping.setdefault(trade.isin, trade.ticker)
     for event in broker_events:
@@ -1697,7 +1719,7 @@ def run_workflow(
     resolution_cutoff_date: str | date | None = None,
     strict_unresolved_payouts: bool = True,
     negative_deemed_income_overrides_path: str | Path | None = None,
-    opening_lots_path: str | Path | None = None,
+    opening_state_path: str | Path | None = None,
     authoritative_start_date: date | None = None,
     carryforward_only: bool = False,
 ) -> dict[str, Path]:
@@ -1706,15 +1728,15 @@ def run_workflow(
     state_dir_path = Path(state_dir or reporting_funds_root)
     oekb_root_dir_path = Path(oekb_root_dir or "data/input/oekb")
     oekb_dir_path = oekb_root_dir_path / str(tax_year)
-    previous_ledger_path = state_dir_path / f"fund_tax_ledger_{tax_year - 1}_final.csv"
-    current_ledger_path = state_dir_path / f"fund_tax_ledger_{tax_year}_final.csv"
+    previous_state_path = state_dir_path / f"fund_tax_state_{tax_year - 1}_final.csv"
+    current_state_path = state_dir_path / f"fund_tax_state_{tax_year}_final.csv"
     payout_state_path = state_dir_path / "fund_tax_payout_state.csv"
     negative_review_override_path = Path(
         negative_deemed_income_overrides_path or state_dir_path / "fund_tax_negative_deemed_distribution_overrides.csv"
     )
-    has_previous_ledger = previous_ledger_path.exists()
-    opening_lots_snapshot_path = Path(opening_lots_path) if opening_lots_path else None
-    has_opening_lot_snapshot = opening_lots_snapshot_path is not None
+    has_previous_state = previous_state_path.exists()
+    opening_state_snapshot_path = Path(opening_state_path) if opening_state_path else None
+    has_opening_state_snapshot = opening_state_snapshot_path is not None
     if resolution_cutoff_date is None:
         resolution_cutoff = date(tax_year + 1, 12, 31)
     elif isinstance(resolution_cutoff_date, date):
@@ -1726,16 +1748,16 @@ def run_workflow(
     historical_tax_xml_path = str(historical_ibkr_tax_xml_path) if historical_ibkr_tax_xml_path else None
     trade_history_path = str(ibkr_trade_history_path)
 
-    if has_previous_ledger:
-        previous_lots = load_ledger(previous_ledger_path)
+    if has_previous_state:
+        previous_positions = load_state(previous_state_path)
         opening_snapshot_date = None
-    elif has_opening_lot_snapshot:
-        previous_lots, opening_snapshot_date = load_opening_lot_snapshot(
-            opening_lots_snapshot_path,
+    elif has_opening_state_snapshot:
+        previous_positions, opening_snapshot_date = load_opening_state_snapshot(
+            opening_state_snapshot_path,
             allowed_asset_classes={"ETF"},
         )
     else:
-        previous_lots = []
+        previous_positions = []
         opening_snapshot_date = None
     previous_payout_state = load_payout_state(payout_state_path)
     negative_deemed_overrides = _load_negative_deemed_distribution_overrides(negative_review_override_path)
@@ -1751,14 +1773,14 @@ def run_workflow(
     broker_events_for_lookup = _merge_lookup_broker_events(all_broker_events, historical_lookup_broker_events)
     all_trades = load_ibkr_etf_trades(
         trade_history_path,
-        require_raw_trades=not (has_previous_ledger or has_opening_lot_snapshot),
+        require_raw_trades=not (has_previous_state or has_opening_state_snapshot),
     )
-    ticker_by_isin = _build_ticker_by_isin(previous_lots, all_trades, broker_events_for_lookup)
+    ticker_by_isin = _build_ticker_by_isin(previous_positions, all_trades, broker_events_for_lookup)
     required_isins = _determine_required_isins(
         tax_year=tax_year,
-        previous_lots=previous_lots,
+        previous_positions=previous_positions,
         all_trades=all_trades,
-        has_opening_state=has_previous_ledger or has_opening_lot_snapshot,
+        has_opening_state=has_previous_state or has_opening_state_snapshot,
     )
     same_year_reports = (
         load_required_oekb_reports(oekb_dir_path, tax_year, required_isins, ticker_by_isin=ticker_by_isin)
@@ -1814,7 +1836,7 @@ def run_workflow(
         current_year_trades=current_year_trades,
         reports=same_year_reports + lookahead_reports,
         broker_events=current_year_broker_events,
-        has_previous_ledger=has_previous_ledger,
+        has_previous_state=has_previous_state,
     )
     currencies = _resolve_required_currencies(
         opening_trades,
@@ -1829,11 +1851,32 @@ def run_workflow(
         currencies=currencies,
     )
 
-    has_seeded_opening_state = has_previous_ledger or has_opening_lot_snapshot
-    working_lots = prepare_lots_for_new_year(previous_lots) if has_seeded_opening_state else []
-    if not has_previous_ledger:
-        for trade in opening_trades:
-            apply_trade(working_lots, trade, fx_table=fx_table, sale_rows=None, track_ytd=False)
+    has_seeded_opening_state = has_previous_state or has_opening_state_snapshot
+    working_positions = prepare_positions_for_new_year(previous_positions) if has_seeded_opening_state else []
+    position_event_rows: list[dict[str, object]] = []
+    if has_opening_state_snapshot and not has_previous_state and opening_snapshot_date is not None:
+        reset_events = [
+            build_basis_reset_event(
+                broker=state.broker,
+                ticker=state.ticker,
+                isin=state.isin,
+                currency=state.currency,
+                asset_class=state.asset_class or "ETF",
+                event_date=opening_snapshot_date,
+                quantity=state.quantity,
+                base_cost_total_eur=state.base_cost_total_eur,
+                basis_adjustment_total_eur=state.basis_adjustment_total_eur,
+                basis_method=state.basis_method or "move_in_fmv_reset",
+                source_file=state.source_file,
+                notes="Opening Austrian ETF basis-reset state.",
+                sequence_key=index,
+            )
+            for index, state in enumerate(previous_positions)
+        ]
+        _, position_event_rows, _ = replay_events([], reset_events)
+    if not has_previous_state:
+        for index, trade in enumerate(opening_trades):
+            apply_trade(working_positions, trade, fx_table=fx_table, sale_rows=None, sequence_key=index)
 
     payout_state = previous_payout_state
     payout_state_source_events = all_broker_events
@@ -1861,14 +1904,14 @@ def run_workflow(
     events.sort(key=lambda item: (item[0], item[1], item[2]))
     skipped_negative_report_keys: set[str] = set()
 
-    for _, _, _, payload in events:
+    for event_index, (_, _, _, payload) in enumerate(events):
         if isinstance(payload, OekbReport):
             if payload.is_ausschuettungsmeldung and not _has_confirmed_distribution_match(payload, current_year_confirmed_broker_events):
                 continue
             if payload.age_per_share_ccy < 0.0:
                 review_row = _resolve_negative_deemed_distribution_review(
                     payload,
-                    working_lots,
+                    working_positions,
                     broker_events_for_lookup,
                     negative_deemed_overrides,
                 )
@@ -1895,7 +1938,7 @@ def run_workflow(
                 if not carryforward_only:
                     income_rows.extend(
                         build_income_rows_for_report(
-                            working_lots,
+                            working_positions,
                             payload,
                             tax_year=tax_year,
                             fx_table=fx_table,
@@ -1906,28 +1949,46 @@ def run_workflow(
                     )
                 basis_adjustment_rows.append(
                     apply_basis_correction(
-                        working_lots,
+                        working_positions,
                         payload,
                         tax_year=tax_year,
                         fx_table=fx_table,
                         quantity_override=eligible_quantity_used,
                         note_prefix=note_prefix,
+                        event_rows=position_event_rows,
+                        sequence_key_start=len(position_event_rows) + event_index,
                     )
                 )
                 continue
             if not carryforward_only:
                 income_rows.extend(
                     build_income_rows_for_report(
-                        working_lots,
+                        working_positions,
                         payload,
                         tax_year=tax_year,
                         fx_table=fx_table,
                         broker_events=current_year_confirmed_broker_events,
                     )
                 )
-            basis_adjustment_rows.append(apply_basis_correction(working_lots, payload, tax_year=tax_year, fx_table=fx_table))
+            basis_adjustment_rows.append(
+                apply_basis_correction(
+                    working_positions,
+                    payload,
+                    tax_year=tax_year,
+                    fx_table=fx_table,
+                    event_rows=position_event_rows,
+                    sequence_key_start=len(position_event_rows) + event_index,
+                )
+            )
         else:
-            apply_trade(working_lots, payload, fx_table=fx_table, sale_rows=sale_rows, track_ytd=True)
+            apply_trade(
+                working_positions,
+                payload,
+                fx_table=fx_table,
+                sale_rows=sale_rows,
+                event_rows=position_event_rows,
+                sequence_key=len(position_event_rows) + event_index,
+            )
 
     annual_reports_for_resolution = [
         report
@@ -1938,7 +1999,7 @@ def run_workflow(
         list(payout_state.values()),
         annual_reports_for_resolution,
         target_tax_year=tax_year,
-        lots_for_quantity=working_lots,
+        positions_for_quantity=working_positions,
         fx_table=fx_table,
     )
     if not carryforward_only:
@@ -1961,7 +2022,8 @@ def run_workflow(
     ]
     income_rows = _filter_superseded_broker_income_rows(income_rows, payout_state_rows)
 
-    ledger_df = lots_to_df(working_lots)
+    state_df = positions_to_df(working_positions)
+    position_events_df = position_event_log_to_df(position_event_rows)
     income_events_df = income_events_to_df(income_rows)
     basis_adjustments_df = basis_adjustments_to_df(basis_adjustment_rows)
     sales_df = sales_to_df(sale_rows)
@@ -1970,15 +2032,17 @@ def run_workflow(
     payout_evidence_review_df = payout_evidence_review_to_df(payout_state_rows, tax_year)
     negative_review_df = negative_deemed_distribution_review_to_df(negative_review_rows)
 
-    write_csv(ledger_df, current_ledger_path)
+    write_csv(state_df, current_state_path)
     income_events_path = output_dir_path / f"fund_tax_income_events_{tax_year}.csv"
     basis_adjustments_path = output_dir_path / f"fund_tax_basis_adjustments_{tax_year}.csv"
+    position_events_path = output_dir_path / f"fund_tax_events_{tax_year}.csv"
     sales_path = output_dir_path / f"fund_tax_sales_{tax_year}.csv"
     payout_state_output_path = state_dir_path / "fund_tax_payout_state.csv"
     payout_resolution_path = output_dir_path / f"fund_tax_payout_resolution_events_{tax_year}.csv"
     payout_evidence_review_path = output_dir_path / f"fund_tax_payout_evidence_review_{tax_year}.csv"
     negative_review_path = output_dir_path / f"fund_tax_negative_deemed_distribution_review_{tax_year}.csv"
     summary_path = output_dir_path / f"reporting_funds_{tax_year}_summary.md"
+    write_csv(position_events_df, position_events_path)
     write_csv(income_events_df, income_events_path)
     write_csv(basis_adjustments_df, basis_adjustments_path)
     write_csv(sales_df, sales_path)
@@ -1989,10 +2053,10 @@ def run_workflow(
     write_summary(
         summary_path,
         tax_year=tax_year,
-        next_period_ledger_path=current_ledger_path,
+        next_period_state_path=current_state_path,
         next_period_payout_state_path=payout_state_output_path,
         next_period_negative_override_path=negative_review_override_path,
-        ledger_df=ledger_df,
+        state_df=state_df,
         income_events_df=income_events_df,
         basis_adjustments_df=basis_adjustments_df,
         sales_df=sales_df,
@@ -2031,7 +2095,8 @@ def run_workflow(
         )
 
     return {
-        "ledger": current_ledger_path,
+        "state": current_state_path,
+        "events": position_events_path,
         "income_events": income_events_path,
         "basis_adjustments": basis_adjustments_path,
         "oekb_adjustments": basis_adjustments_path,

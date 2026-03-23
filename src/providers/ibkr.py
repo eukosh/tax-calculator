@@ -1,12 +1,11 @@
 import logging
-from collections import defaultdict
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal, Sequence
 
 import polars as pl
 
+from src.broker_history import build_fx_table_from_rates_df, get_fx_rate, load_ibkr_stock_like_trades, round_money, round_qty
 from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, FLOAT_PRECISION, CurrencyCode, TransactionTypeIBKR
 from src.const import Column as Col
 from src.finanzonline import (
@@ -21,17 +20,15 @@ from src.finanzonline import (
     ORDINARY_INCOME_BUCKET_CATEGORY,
     empty_finanzonline_bucket_df,
 )
-from src.tax_lots import (
-    TaxLot,
-    build_fx_table_from_rates_df,
-    build_tax_lot_from_trade,
-    consume_fifo_sell,
-    get_fx_rate,
-    load_ibkr_stock_like_trades,
-    load_opening_tax_lots,
-    round_money,
-    round_qty,
-    tax_lots_to_df,
+from src.moving_average import (
+    PositionEvent,
+    build_basis_reset_event,
+    build_buy_event,
+    build_sell_event,
+    load_position_states,
+    position_events_to_df,
+    position_states_to_df,
+    replay_events,
 )
 from src.utils import (
     build_separate_trade_profit_loss_rows,
@@ -248,348 +245,155 @@ def build_finanzonline_dividend_buckets_ibkr(
     ).cast(BUCKET_SCHEMA)
 
 
-def _load_closed_trade_lots_df(
-    xml_file_path: str | Sequence[str],
+def _build_position_events_from_raw_trades(
+    raw_trades,
+    *,
     exchange_rates_df: pl.DataFrame,
-    start_date: date,
-    end_date: date,
-    excluded_trade_subcategories: set[str] | None = None,
-) -> pl.DataFrame:
-    trades_df = read_xml_to_df(
-        file_path=xml_file_path,
-        xml_extract_func=lambda root: extract_elements(root.find(".//Trades"), "Lot"),
-        dedupe=True,
-    )
-    if trades_df.is_empty():
-        return pl.DataFrame()
-
-    trades_df = trades_df.with_columns(
-        (
-            pl.col("subCategory").cast(pl.String).fill_null("")
-            if "subCategory" in trades_df.columns
-            else pl.lit("", dtype=pl.String)
-        ).alias("subCategory"),
-        (
-            pl.col("assetCategory").cast(pl.String).fill_null("STK")
-            if "assetCategory" in trades_df.columns
-            else pl.lit("STK", dtype=pl.String)
-        ).alias("assetCategory"),
-        (
-            pl.col("buySell").cast(pl.String).fill_null("SELL")
-            if "buySell" in trades_df.columns
-            else pl.lit("SELL", dtype=pl.String)
-        ).alias("buySell"),
-        (
-            pl.col("levelOfDetail").cast(pl.String).fill_null("CLOSED_LOT")
-            if "levelOfDetail" in trades_df.columns
-            else pl.lit("CLOSED_LOT", dtype=pl.String)
-        ).alias("levelOfDetail"),
-        (
-            pl.col("quantity").cast(pl.Float64).abs()
-            if "quantity" in trades_df.columns
-            else pl.lit(None, dtype=pl.Float64)
-        ).alias("quantity"),
-        (
-            pl.col("transactionID").cast(pl.String).fill_null("")
-            if "transactionID" in trades_df.columns
-            else pl.lit("", dtype=pl.String)
-        ).alias("sale_trade_id"),
-        (
-            pl.col("isin").cast(pl.String).fill_null("")
-            if "isin" in trades_df.columns
-            else (
-                pl.col("securityID").cast(pl.String).fill_null("")
-                if "securityID" in trades_df.columns
-                else pl.lit("", dtype=pl.String)
-            )
-        ).alias("isin"),
-    )
-
-    trades_df = (
-        trades_df.filter(pl.col("assetCategory") == "STK")
-        .filter(pl.col("buySell") == "SELL")
-        .filter(pl.col("levelOfDetail") == "CLOSED_LOT")
-        .rename({"openDateTime": Col.buy_date, "tradeDate": Col.trade_date, "fifoPnlRealized": Col.profit})
-        .select(
-            Col.symbol,
-            "isin",
-            pl.col("cost").cast(pl.Float64),
-            Col.currency,
-            pl.col("subCategory").alias("sub_category"),
-            pl.col("quantity"),
-            pl.col("dateTime").str.strptime(pl.Datetime, format=IBKR_DATETIME_FORMAT).alias("sale_datetime"),
-            pl.col(Col.buy_date).str.strptime(pl.Datetime, format=IBKR_DATETIME_FORMAT).alias("buy_datetime"),
-            pl.col(Col.buy_date).str.to_date(format=IBKR_DATETIME_FORMAT).alias(Col.buy_date),
-            pl.col(Col.trade_date).str.to_date().alias(Col.trade_date),
-            pl.col(Col.profit).cast(pl.Float64),
-            "sale_trade_id",
-        )
-        .filter(pl.col(Col.trade_date).is_between(start_date, end_date))
-        .with_columns((pl.col("cost") + pl.col(Col.profit)).alias(Col.proceeds))
-    )
-    if excluded_trade_subcategories:
-        trades_df = trades_df.filter(~pl.col("sub_category").is_in(sorted(excluded_trade_subcategories)))
-    if trades_df.is_empty():
-        return pl.DataFrame()
-
-    joined_df = join_exchange_rates(
-        df=trades_df,
-        rates_df=exchange_rates_df,
-        df_date_col=Col.trade_date,
-    ).select(*trades_df.columns, pl.col(Col.exchange_rate).alias("sell_exchange_rate"))
-
-    relevant_currencies = set(joined_df[Col.currency].unique().to_list())
+    sequence_offset: int = 0,
+) -> list[PositionEvent]:
+    if not raw_trades:
+        return []
+    relevant_currencies = {trade.currency for trade in raw_trades if trade.currency != CurrencyCode.euro.value}
     fx_table = build_fx_table_from_rates_df(exchange_rates_df, currencies=relevant_currencies)
-
-    broker_rows: list[dict[str, object]] = []
-    for row in joined_df.to_dicts():
-        sell_exchange_rate = float(row["sell_exchange_rate"])
-        proceeds_euro = round_money(
-            row[Col.proceeds]
-            if row[Col.currency] == CurrencyCode.euro
-            else float(row[Col.proceeds]) / sell_exchange_rate
+    events: list[PositionEvent] = []
+    for index, trade in enumerate(raw_trades, start=sequence_offset):
+        fx_to_eur = get_fx_rate(fx_table, trade.currency, trade.trade_date)
+        if trade.operation == "buy":
+            events.append(
+                build_buy_event(
+                    broker="ibkr",
+                    ticker=trade.ticker,
+                    isin=trade.isin,
+                    currency=trade.currency,
+                    asset_class=trade.asset_class,
+                    trade_date=trade.trade_date,
+                    quantity=trade.quantity,
+                    price_ccy=trade.price_ccy,
+                    fx_to_eur=fx_to_eur,
+                    source_id=trade.trade_id,
+                    source_file=trade.source_statement_file,
+                    sequence_key=index,
+                )
+            )
+            continue
+        events.append(
+            build_sell_event(
+                broker="ibkr",
+                ticker=trade.ticker,
+                isin=trade.isin,
+                currency=trade.currency,
+                asset_class=trade.asset_class,
+                trade_date=trade.trade_date,
+                quantity=trade.quantity,
+                price_ccy=trade.price_ccy,
+                fx_to_eur=fx_to_eur,
+                source_id=trade.trade_id,
+                source_file=trade.source_statement_file,
+                notes="Austrian moving-average sale result from raw IBKR trade history.",
+                sequence_key=index,
+            )
         )
-
-        buy_exchange_rate: float | None = None
-        cost_euro: float | None = None
-        profit_euro: float | None = None
-        if row[Col.currency] == CurrencyCode.euro:
-            buy_exchange_rate = 1.0
-            cost_euro = round_money(float(row["cost"]))
-            profit_euro = round_money(proceeds_euro - cost_euro)
-        else:
-            try:
-                buy_exchange_rate = round_money(get_fx_rate(fx_table, row[Col.currency], row[Col.buy_date]))
-                cost_euro = round_money(float(row["cost"]) / buy_exchange_rate)
-                profit_euro = round_money(proceeds_euro - cost_euro)
-            except ValueError:
-                buy_exchange_rate = None
-                cost_euro = None
-                profit_euro = None
-
-        broker_rows.append(
-            {
-                **row,
-                "buy_exchange_rate": buy_exchange_rate,
-                "sell_exchange_rate": round_money(sell_exchange_rate),
-                "cost_euro": cost_euro,
-                Col.proceeds_euro: proceeds_euro,
-                Col.profit_euro: profit_euro,
-            }
-        )
-
-    return pl.DataFrame(broker_rows)
+    return events
 
 
-def _amount_matches(left: float, right: float, *, tolerance: float = 10 ** (-FLOAT_PRECISION)) -> bool:
-    return abs(round(float(left), FLOAT_PRECISION) - round(float(right), FLOAT_PRECISION)) <= tolerance
+def _extract_ibkr_trade_rows(root) -> list[dict[str, str | None]]:
+    rows: list[dict[str, str | None]] = []
+    for parent_tag in (".//TradeConfirms", ".//Trades"):
+        for parent in root.findall(parent_tag):
+            rows.extend(extract_elements(parent, "TradeConfirm"))
+            rows.extend(extract_elements(parent, "Trade"))
+    return rows
 
 
-def _apply_raw_trade_to_lots(
-    lots: list[TaxLot],
-    trade,
-    *,
-    fx_table: dict[str, tuple[list[date], list[float]]],
-    track_ytd: bool,
-) -> list[dict[str, object]]:
-    if trade.operation == "buy":
-        buy_fx = get_fx_rate(fx_table, trade.currency, trade.trade_date)
-        lots.append(build_tax_lot_from_trade(trade, buy_fx=buy_fx))
-        return []
-    sale_fx = get_fx_rate(fx_table, trade.currency, trade.trade_date)
-    return consume_fifo_sell(
-        lots,
-        trade,
-        sale_fx=sale_fx,
-        track_ytd=track_ytd,
+def _select_stock_event_columns(events_df: pl.DataFrame) -> pl.DataFrame:
+    return events_df.select(
+        [
+            "ticker",
+            "isin",
+            "asset_class",
+            "currency",
+            "event_type",
+            "event_date",
+            "effective_date",
+            "quantity",
+            "quantity_delta",
+            "price_ccy",
+            "fx_to_eur",
+            "proceeds_eur",
+            "base_cost_delta_eur",
+            "realized_basis_eur",
+            "realized_base_cost_eur",
+            "realized_gain_loss_eur",
+            "split_ratio",
+            "quantity_after",
+            "base_cost_total_eur_after",
+            "total_basis_eur_after",
+            "average_basis_eur_after",
+            "broker",
+            "source_id",
+            "sequence_key",
+            "source_file",
+            "notes",
+        ]
     )
 
 
-def _reconcile_authoritative_sales(
-    sale_rows: list[dict[str, object]],
-    broker_closed_lots_df: pl.DataFrame,
-    *,
-    snapshot_date: date | None,
-) -> list[dict[str, object]]:
-    if not sale_rows:
-        return []
-
-    broker_rows = broker_closed_lots_df.to_dicts() if not broker_closed_lots_df.is_empty() else []
-    broker_by_sale: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
-    for row in broker_rows:
-        broker_key = (
-            str(row.get("isin") or ""),
-            row["sale_datetime"].strftime(IBKR_DATETIME_FORMAT),
-        )
-        broker_by_sale[broker_key].append(row)
-
-    internal_by_sale: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
-    for row in sale_rows:
-        internal_key = (str(row["isin"]), str(row["sale_datetime"]))
-        internal_by_sale[internal_key].append(row)
-
-    reconciliation_rows: list[dict[str, object]] = []
-    for sale_key, internal_rows in internal_by_sale.items():
-        broker_group = broker_by_sale.get(sale_key)
-        if not broker_group:
-            raise ValueError(
-                f"No broker closed lots found for authoritative sale {sale_key[0]} at {sale_key[1]}"
-            )
-
-        internal_total_qty = round_qty(sum(float(row["quantity_from_lot"]) for row in internal_rows))
-        broker_total_qty = round_qty(sum(float(row["quantity"] or 0.0) for row in broker_group))
-        if internal_total_qty != broker_total_qty:
-            raise ValueError(
-                f"Authoritative sale quantity mismatch for {sale_key[0]} at {sale_key[1]}: "
-                f"internal={internal_total_qty}, broker={broker_total_qty}"
-            )
-
-        internal_total_proceeds_eur = round_money(sum(float(row["taxable_proceeds_eur"]) for row in internal_rows))
-        total_sale_fee_eur = round_money(sum(float(row.get("allocated_sale_fee_eur") or 0.0) for row in internal_rows))
-        broker_total_proceeds_eur = round_money(sum(float(row["proceeds_euro"]) for row in broker_group))
-        broker_total_proceeds_eur_adjusted = round_money(broker_total_proceeds_eur + total_sale_fee_eur)
-        if not _amount_matches(internal_total_proceeds_eur, broker_total_proceeds_eur_adjusted):
-            raise ValueError(
-                f"Authoritative sale proceeds mismatch for {sale_key[0]} at {sale_key[1]}: "
-                f"internal={internal_total_proceeds_eur}, broker_adjusted={broker_total_proceeds_eur_adjusted}"
-            )
-
-        exact_internal_rows = [row for row in internal_rows if row["basis_origin"] == "post_move_buy"]
-        if exact_internal_rows:
-            exact_internal_groups: dict[tuple[str, float], dict[str, object]] = defaultdict(
-                lambda: {
-                    "quantity": 0.0,
-                    "basis_eur": 0.0,
-                    "proceeds_eur": 0.0,
-                    "gain_eur": 0.0,
-                    "buy_fee_eur": 0.0,
-                    "sale_fee_eur": 0.0,
-                }
-            )
-            for row in exact_internal_rows:
-                group_key = (str(row["lot_buy_datetime"]), float(row["quantity_from_lot"]))
-                exact_internal_groups[group_key]["quantity"] += float(row["quantity_from_lot"])
-                exact_internal_groups[group_key]["basis_eur"] += float(row["taxable_original_basis_eur"])
-                exact_internal_groups[group_key]["proceeds_eur"] += float(row["taxable_proceeds_eur"])
-                exact_internal_groups[group_key]["gain_eur"] += float(row["taxable_gain_loss_eur"])
-                exact_internal_groups[group_key]["buy_fee_eur"] += float(row.get("allocated_buy_fee_eur") or 0.0)
-                exact_internal_groups[group_key]["sale_fee_eur"] += float(row.get("allocated_sale_fee_eur") or 0.0)
-
-            if snapshot_date is None:
-                exact_broker_rows = broker_group
-            else:
-                exact_broker_rows = [row for row in broker_group if row["buy_datetime"].date() >= snapshot_date]
-            exact_broker_groups: dict[tuple[str, float], dict[str, object]] = defaultdict(
-                lambda: {"quantity": 0.0, "basis_eur": 0.0, "proceeds_eur": 0.0, "gain_eur": 0.0}
-            )
-            for row in exact_broker_rows:
-                if row["cost_euro"] is None or row["profit_euro"] is None:
-                    raise ValueError(
-                        f"Missing buy-side FX data for post-move broker lot {sale_key[0]} at {sale_key[1]} "
-                        f"opened {row['buy_datetime'].strftime(IBKR_DATETIME_FORMAT)}"
-                    )
-                group_key = (row["buy_datetime"].strftime(IBKR_DATETIME_FORMAT), float(row["quantity"] or 0.0))
-                exact_broker_groups[group_key]["quantity"] += float(row["quantity"] or 0.0)
-                exact_broker_groups[group_key]["basis_eur"] += float(row["cost_euro"])
-                exact_broker_groups[group_key]["proceeds_eur"] += float(row["proceeds_euro"])
-                exact_broker_groups[group_key]["gain_eur"] += float(row["profit_euro"])
-
-            if set(exact_internal_groups) != set(exact_broker_groups):
-                raise ValueError(
-                    f"Post-move exact-match broker lot keys differ for {sale_key[0]} at {sale_key[1]}: "
-                    f"internal={sorted(exact_internal_groups)}, broker={sorted(exact_broker_groups)}"
-                )
-
-            for group_key, internal_group in exact_internal_groups.items():
-                broker_group_values = exact_broker_groups[group_key]
-                broker_basis_eur_adjusted = round_money(broker_group_values["basis_eur"] - internal_group["buy_fee_eur"])
-                broker_proceeds_eur_adjusted = round_money(
-                    broker_group_values["proceeds_eur"] + internal_group["sale_fee_eur"]
-                )
-                broker_gain_eur_adjusted = round_money(broker_proceeds_eur_adjusted - broker_basis_eur_adjusted)
-                if not _amount_matches(internal_group["basis_eur"], broker_basis_eur_adjusted):
-                    raise ValueError(
-                        f"Post-move basis mismatch for {sale_key[0]} at {sale_key[1]} lot {group_key[0]}: "
-                        f"internal={round_money(internal_group['basis_eur'])}, "
-                        f"broker_adjusted={broker_basis_eur_adjusted}"
-                    )
-                if not _amount_matches(internal_group["proceeds_eur"], broker_proceeds_eur_adjusted):
-                    raise ValueError(
-                        f"Post-move proceeds mismatch for {sale_key[0]} at {sale_key[1]} lot {group_key[0]}: "
-                        f"internal={round_money(internal_group['proceeds_eur'])}, "
-                        f"broker_adjusted={broker_proceeds_eur_adjusted}"
-                    )
-                if not _amount_matches(internal_group["gain_eur"], broker_gain_eur_adjusted):
-                    raise ValueError(
-                        f"Post-move gain/loss mismatch for {sale_key[0]} at {sale_key[1]} lot {group_key[0]}: "
-                        f"internal={round_money(internal_group['gain_eur'])}, "
-                        f"broker_adjusted={broker_gain_eur_adjusted}"
-                    )
-
-        for row in internal_rows:
-            is_snapshot_row = row["basis_origin"] == "snapshot"
-            reconciliation_rows.append(
-                {
-                    "sale_trade_id": row["sale_trade_id"],
-                    "sale_date": row["sale_date"],
-                    "sale_datetime": row["sale_datetime"],
-                    "ticker": row["ticker"],
-                    "isin": row["isin"],
-                    "lot_id": row["lot_id"],
-                    "lot_buy_date": row["lot_buy_date"],
-                    "lot_buy_datetime": row["lot_buy_datetime"],
-                    "quantity_from_lot": row["quantity_from_lot"],
-                    "basis_origin": row["basis_origin"],
-                    "reconciliation_segment": (
-                        "snapshot_derived_informational_segment" if is_snapshot_row else "post_move_exact_match_segment"
-                    ),
-                    "reconciliation_status": "informational" if is_snapshot_row else "matched",
-                    "sale_aggregate_status": "matched",
-                    "sale_aggregate_quantity_internal": internal_total_qty,
-                    "sale_aggregate_quantity_broker": broker_total_qty,
-                    "sale_aggregate_proceeds_eur_internal": round_money(internal_total_proceeds_eur),
-                    "sale_aggregate_proceeds_eur_broker": round_money(broker_total_proceeds_eur_adjusted),
-                    "reconciliation_notes": (
-                        "Snapshot-derived basis differences are informational only."
-                        if is_snapshot_row
-                        else "Matched against broker closed-lot output."
-                    ),
-                }
-            )
-
-    return reconciliation_rows
+def _select_stock_sale_columns(sales_df: pl.DataFrame) -> pl.DataFrame:
+    return sales_df.select(
+        [
+            "sale_date",
+            "ticker",
+            "isin",
+            "quantity_sold",
+            "sale_price_ccy",
+            "sale_fx",
+            "taxable_proceeds_eur",
+            "realized_base_cost_eur",
+            "taxable_original_basis_eur",
+            "realized_oekb_adjustment_eur",
+            "taxable_stepup_basis_eur",
+            "taxable_total_basis_eur",
+            "taxable_gain_loss_eur",
+            "notes",
+            "sale_trade_id",
+        ]
+    )
 
 
-def _build_authoritative_sales_detail_df(
-    xml_file_path: str | Sequence[str],
+def _build_stock_authoritative_outputs(
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
     *,
     ibkr_trade_history_path: str,
-    austrian_opening_lots_path: str | None,
+    austrian_opening_state_path: str | None,
     authoritative_start_date: date | None,
     excluded_trade_subcategories: set[str] | None,
-) -> tuple[pl.DataFrame | None, pl.DataFrame | None, list[TaxLot] | None]:
-    if authoritative_start_date is not None and not austrian_opening_lots_path:
+) -> tuple[pl.DataFrame | None, pl.DataFrame, pl.DataFrame]:
+    if authoritative_start_date is not None and not austrian_opening_state_path:
         raise ValueError(
-            "authoritative_start_date requires austrian_opening_lots_path; "
-            "move-in authoritative start without opening lots is not supported"
+            "authoritative_start_date requires austrian_opening_state_path; "
+            "move-in authoritative start without opening state is not supported"
         )
 
-    opening_lots: list[TaxLot] = []
+    opening_states = []
     snapshot_date: date | None = None
-    if austrian_opening_lots_path:
-        opening_lots, snapshot_date = load_opening_tax_lots(
-            austrian_opening_lots_path,
-            allowed_asset_classes=AUTHORITATIVE_STOCK_LIKE_SUBCATEGORIES,
-        )
+    if austrian_opening_state_path:
+        loaded_states = [
+            state
+            for state in load_position_states(austrian_opening_state_path)
+            if state.asset_class in AUTHORITATIVE_STOCK_LIKE_SUBCATEGORIES
+        ]
+        opening_states = loaded_states
+        snapshot_dates = {state.snapshot_date for state in loaded_states if state.snapshot_date}
+        if snapshot_dates:
+            snapshot_date = date.fromisoformat(sorted(snapshot_dates)[0])
     raw_trades = load_ibkr_stock_like_trades(
         ibkr_trade_history_path,
         allowed_asset_classes=AUTHORITATIVE_STOCK_LIKE_SUBCATEGORIES,
     )
     if not raw_trades:
-        return None, None, None
+        return None, position_states_to_df(opening_states), _select_stock_event_columns(position_events_to_df([]))
 
     processing_start_date = start_date
     if authoritative_start_date is not None:
@@ -609,86 +413,42 @@ def _build_authoritative_sales_detail_df(
         current_period_trades = [
             trade for trade in current_period_trades if trade.asset_class not in excluded_trade_subcategories
         ]
+    opening_events = _build_position_events_from_raw_trades(opening_trades, exchange_rates_df=exchange_rates_df)
+    opening_states, _, _ = replay_events(opening_states, opening_events)
 
-    working_lots = deepcopy(opening_lots)
-    relevant_currencies = {lot.currency for lot in opening_lots}
-    relevant_currencies.update(trade.currency for trade in opening_trades)
-    relevant_currencies.update(trade.currency for trade in current_period_trades)
-    if relevant_currencies:
-        fx_table = build_fx_table_from_rates_df(exchange_rates_df, currencies=relevant_currencies)
-        for trade in opening_trades:
-            _apply_raw_trade_to_lots(working_lots, trade, fx_table=fx_table, track_ytd=False)
-    else:
-        fx_table = {}
-
-    if not current_period_trades:
-        return None, None, working_lots
-
-    sale_rows: list[dict[str, object]] = []
-    for trade in current_period_trades:
-        allocations = _apply_raw_trade_to_lots(working_lots, trade, fx_table=fx_table, track_ytd=True)
-        for allocation in allocations:
-            allocation["reconciliation_segment"] = (
-                "snapshot_derived_informational_segment"
-                if allocation["basis_origin"] == "snapshot"
-                else "post_move_exact_match_segment"
+    run_start_events: list[PositionEvent] = []
+    if snapshot_date is not None and start_date <= snapshot_date <= end_date:
+        for index, state in enumerate(opening_states):
+            run_start_events.append(
+                build_basis_reset_event(
+                    broker=state.broker,
+                    ticker=state.ticker,
+                    isin=state.isin,
+                    currency=state.currency,
+                    asset_class=state.asset_class,
+                    event_date=snapshot_date,
+                    quantity=state.quantity,
+                    base_cost_total_eur=state.base_cost_total_eur,
+                    basis_adjustment_total_eur=state.basis_adjustment_total_eur,
+                    basis_method=state.basis_method or "carryforward_opening_state",
+                    source_file=state.source_file,
+                    notes="Synthetic event log anchor for opening Austrian state.",
+                    sequence_key=index,
+                )
             )
-            allocation["notes"] = (
-                "Austrian-authoritative FIFO sale result uses move-in snapshot basis for pre-move holdings."
-                if allocation["basis_origin"] == "snapshot"
-                else "Austrian-authoritative FIFO sale result uses raw post-move buy lots and matches broker closed-lot output after fee adjustment."
-            )
-            sale_rows.append(allocation)
 
-    if not sale_rows:
-        return None, None, working_lots
-
-    broker_closed_lots_df = _load_closed_trade_lots_df(
-        xml_file_path=xml_file_path,
+    current_events = _build_position_events_from_raw_trades(
+        current_period_trades,
         exchange_rates_df=exchange_rates_df,
-        start_date=processing_start_date,
-        end_date=end_date,
-        excluded_trade_subcategories=excluded_trade_subcategories,
+        sequence_offset=len(run_start_events),
     )
-    reconciliation_rows = _reconcile_authoritative_sales(sale_rows, broker_closed_lots_df, snapshot_date=snapshot_date)
-    reconciliation_df = pl.DataFrame(reconciliation_rows)
-    sale_df = pl.DataFrame(sale_rows)
-    detail_columns = [
-        "sale_date",
-        "sale_datetime",
-        "sale_trade_id",
-        "ticker",
-        "isin",
-        "quantity_sold",
-        "sale_price_ccy",
-        "sale_fx",
-        "lot_id",
-        "lot_buy_date",
-        "lot_buy_datetime",
-        "lot_source_trade_id",
-        "quantity_from_lot",
-        "taxable_proceeds_eur",
-        "taxable_original_basis_eur",
-        "taxable_total_basis_eur",
-        "taxable_gain_loss_eur",
-        "allocated_buy_fee_eur",
-        "allocated_sale_fee_eur",
-        "basis_origin",
-        "notes",
-    ]
-    reconciliation_df = reconciliation_df.rename(
-        {
-            "sale_aggregate_proceeds_eur_internal": "sale_proceeds_eur_internal",
-            "sale_aggregate_proceeds_eur_broker": "sale_proceeds_eur_broker_adjusted",
-        }
-    ).sort(["sale_date", "ticker", "lot_buy_date", "lot_id"])
-    return (
-        sale_df.select([column for column in detail_columns if column in sale_df.columns]).sort(
-            ["sale_date", "ticker", "lot_buy_date", "lot_id"]
-        ),
-        reconciliation_df,
-        working_lots,
-    )
+    final_states, event_rows, sale_rows = replay_events(opening_states, current_events)
+    events_df = position_events_to_df(event_rows)
+    sales_df = _select_stock_sale_columns(pl.DataFrame(sale_rows).sort(["sale_date", "ticker"])) if sale_rows else None
+    if run_start_events:
+        _, opening_event_rows, _ = replay_events([], run_start_events)
+        events_df = position_events_to_df(opening_event_rows + event_rows)
+    return sales_df, position_states_to_df(final_states), _select_stock_event_columns(events_df)
 
 
 def _build_trade_summary_df(
@@ -736,13 +496,12 @@ def _build_trade_summary_df(
 
 
 def process_trades_ibkr(
-    xml_file_path: str | Sequence[str],
     exchange_rates_df: pl.DataFrame,
     start_date: date,
     end_date: date,
     separate_trade_profit_loss: bool = True,
     excluded_trade_subcategories: set[str] | None = None,
-    austrian_opening_lots_path: str | None = None,
+    austrian_opening_state_path: str | None = None,
     ibkr_trade_history_path: str | None = None,
     authoritative_start_date: date | None = None,
 ) -> tuple[pl.DataFrame | None, pl.DataFrame | None, pl.DataFrame | None, pl.DataFrame | None]:
@@ -750,31 +509,30 @@ def process_trades_ibkr(
     Returns:
     - trade tax detail dataframe
     - trade summary dataframe
-    - final stock-like lot-state dataframe
-    - reconciliation dataframe
+    - final stock-like moving-average state dataframe
+    - stock position events dataframe
     """
     logging.info("\n\n======================== Processing Trades ========================\n")
     if not ibkr_trade_history_path:
         raise ValueError("process_trades_ibkr requires ibkr_trade_history_path; broker closed-lot fallback has been removed")
 
-    trades_detail_df, reconciliation_df, working_lots = _build_authoritative_sales_detail_df(
-        xml_file_path=xml_file_path,
+    trades_detail_df, state_df, returned_events_df = _build_stock_authoritative_outputs(
         exchange_rates_df=exchange_rates_df,
         start_date=start_date,
         end_date=end_date,
         ibkr_trade_history_path=ibkr_trade_history_path,
-        austrian_opening_lots_path=austrian_opening_lots_path,
+        austrian_opening_state_path=austrian_opening_state_path,
         authoritative_start_date=authoritative_start_date,
         excluded_trade_subcategories=excluded_trade_subcategories,
     )
     if trades_detail_df is None or trades_detail_df.is_empty():
         logging.warning("No authoritative stock-like sales matched the selected date range.")
-        return None, None, tax_lots_to_df(working_lots or []), reconciliation_df
+        return None, None, state_df, (returned_events_df if returned_events_df is not None and returned_events_df.height else None)
     trades_summary_df = _build_trade_summary_df(
         trades_detail_df,
         separate_trade_profit_loss=separate_trade_profit_loss,
     )
-    return trades_detail_df, trades_summary_df, tax_lots_to_df(working_lots or []), reconciliation_df
+    return trades_detail_df, trades_summary_df, state_df, (returned_events_df if returned_events_df.height else None)
 
 
 def process_cash_transactions_ibkr(
@@ -822,15 +580,22 @@ def process_cash_transactions_ibkr(
 
 
 def process_bonds_ibkr(
-    xml_file_path: str | Sequence[str], exchange_rates_df: pl.DataFrame, start_date: date, end_date: date
+    xml_file_path: str | Sequence[str],
+    exchange_rates_df: pl.DataFrame,
+    start_date: date,
+    end_date: date,
+    ibkr_trade_history_path: str | Sequence[str] | None = None,
 ) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
     """
-    1. Load corporate actions from XML and select bond-tax-relevant columns.
-    2. Filter events by report date for the requested reporting period.
-    3. Join FX by report date and convert realized PnL to EUR.
+    1. Load corporate actions from XML and keep bill maturities plus any non-bill bond actions.
+    2. For Treasury bills, rebuild Austrian basis from raw BUY trade history:
+       - use buy amount plus accrued interest
+       - exclude buy commission from basis
+       - convert buy basis to EUR at buy-date FX
+       - convert maturity proceeds to EUR at maturity/report-date FX
+    3. For other `assetCategory="BOND"` actions, keep the existing broker realized-PnL path.
     4. Compute KESt on EUR realized PnL for each event.
     5. Produce detailed per-event output and aggregate country-level summary totals.
-    6. Return detail dataframe and country aggregate dataframe.
     """
     logging.info("\n\n======================== Processing Corporate Actions ========================\n")
 
@@ -846,6 +611,8 @@ def process_bonds_ibkr(
 
     corporate_actions_df = corporate_actions_df.select(
         [
+            pl.col("assetCategory").alias("asset_category"),
+            pl.col("type").alias("action_type"),
             pl.col("reportDate").str.strptime(pl.Date, "%Y-%m-%d").alias("report_date"),
             "isin",
             pl.col("issuerCountryCode").alias("issuer_country_code"),
@@ -857,27 +624,109 @@ def process_bonds_ibkr(
 
     logging.debug("\nCorporate Actions DataFrame: %s\n", corporate_actions_df)
 
-    joined_df = join_exchange_rates(
-        df=corporate_actions_df,
-        rates_df=exchange_rates_df,
-        df_date_col="report_date",
+    bill_maturities_df = corporate_actions_df.filter(
+        (pl.col("asset_category") == "BILL") & (pl.col("action_type") == "TM")
     )
+    other_bond_actions_df = corporate_actions_df.filter(pl.col("asset_category") == "BOND")
 
-    joined_df = convert_to_euro(joined_df, "realized_pnl")
-    tax_df = calculate_kest(joined_df, amount_col="realized_pnl_euro")
+    tax_frames: list[pl.DataFrame] = []
 
-    tax_df = tax_df.select(
-        "report_date",
-        "isin",
-        "issuer_country_code",
-        "currency",
-        "proceeds",
-        "realized_pnl",
-        "realized_pnl_euro",
-        "realized_pnl_euro_net",
-        "kest_gross",
-        "kest_net",
-    ).sort("realized_pnl", "isin", descending=True)
+    if not bill_maturities_df.is_empty():
+        if not ibkr_trade_history_path:
+            raise ValueError("Bill maturity processing requires ibkr_trade_history_path.")
+
+        bill_trade_rows_df = read_xml_to_df(
+            file_path=ibkr_trade_history_path,
+            xml_extract_func=_extract_ibkr_trade_rows,
+            dedupe=True,
+        )
+        bill_buy_trades_df = bill_trade_rows_df.filter(
+            (pl.col("assetCategory") == "BILL") & (pl.col("buySell") == "BUY")
+        ).select(
+            pl.col("tradeDate").str.strptime(pl.Date, "%Y-%m-%d").alias("trade_date"),
+            "isin",
+            "currency",
+            pl.col("amount").cast(pl.Float64).abs().alias("basis_ccy_ex_fees"),
+            pl.col("commission").cast(pl.Float64, strict=False).abs().fill_null(0.0).alias("ignored_buy_commission_ccy"),
+            pl.col("accruedInt").cast(pl.Float64, strict=False).abs().fill_null(0.0).alias("accrued_interest_ccy"),
+        ).with_columns(
+            (pl.col("basis_ccy_ex_fees") + pl.col("accrued_interest_ccy")).round(FLOAT_PRECISION).alias("basis_ccy_ex_fees")
+        )
+
+        relevant_isins = bill_maturities_df["isin"].unique().to_list()
+        bill_buy_trades_df = bill_buy_trades_df.filter(pl.col("isin").is_in(relevant_isins))
+        if bill_buy_trades_df.is_empty():
+            raise ValueError("No raw BILL buy trades were found for the matched bill maturity events.")
+
+        buy_basis_df = (
+            convert_to_euro(
+                join_exchange_rates(df=bill_buy_trades_df, rates_df=exchange_rates_df, df_date_col="trade_date"),
+                "basis_ccy_ex_fees",
+            )
+            .group_by("isin", "currency")
+            .agg(
+                pl.sum("basis_ccy_ex_fees").round(FLOAT_PRECISION).alias("basis_ccy_ex_fees"),
+                pl.sum("basis_ccy_ex_fees_euro").round(FLOAT_PRECISION).alias("basis_euro_ex_fees"),
+                pl.sum("ignored_buy_commission_ccy").round(FLOAT_PRECISION).alias("ignored_buy_commission_ccy"),
+            )
+        )
+
+        bill_tax_df = (
+            convert_to_euro(
+                join_exchange_rates(df=bill_maturities_df, rates_df=exchange_rates_df, df_date_col="report_date"),
+                "proceeds",
+            )
+            .join(buy_basis_df, on=["isin", "currency"], how="left")
+        )
+
+        missing_basis_df = bill_tax_df.filter(pl.col("basis_ccy_ex_fees").is_null())
+        if not missing_basis_df.is_empty():
+            raise ValueError(f"Missing raw BILL buy basis for maturity events:\n{missing_basis_df}")
+
+        bill_tax_df = bill_tax_df.with_columns(
+            (pl.col("proceeds") - pl.col("basis_ccy_ex_fees")).round(FLOAT_PRECISION).alias("realized_pnl"),
+            (pl.col("proceeds_euro") - pl.col("basis_euro_ex_fees")).round(FLOAT_PRECISION).alias("realized_pnl_euro"),
+        )
+        bill_tax_df = calculate_kest(bill_tax_df, amount_col="realized_pnl_euro").select(
+            "report_date",
+            "isin",
+            "issuer_country_code",
+            "currency",
+            "proceeds",
+            "realized_pnl",
+            "realized_pnl_euro",
+            "realized_pnl_euro_net",
+            "kest_gross",
+            "kest_net",
+        )
+        tax_frames.append(bill_tax_df)
+
+    if not other_bond_actions_df.is_empty():
+        joined_df = join_exchange_rates(
+            df=other_bond_actions_df,
+            rates_df=exchange_rates_df,
+            df_date_col="report_date",
+        )
+        joined_df = convert_to_euro(joined_df, "realized_pnl")
+        other_bond_tax_df = calculate_kest(joined_df, amount_col="realized_pnl_euro").select(
+            "report_date",
+            "isin",
+            "issuer_country_code",
+            "currency",
+            "proceeds",
+            "realized_pnl",
+            "realized_pnl_euro",
+            "realized_pnl_euro_net",
+            "kest_gross",
+            "kest_net",
+        )
+        tax_frames.append(other_bond_tax_df)
+
+    if not tax_frames:
+        logging.warning("No bond-like corporate actions matched the selected date range.")
+        return None, None
+
+    tax_df = pl.concat(tax_frames, how="vertical_relaxed").sort("realized_pnl", "isin", descending=True)
     logging.info(tax_df)
 
     country_agg_df = (

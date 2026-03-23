@@ -13,7 +13,7 @@ from scripts.reporting_funds.ibkr_source import (
     load_ibkr_etf_trades,
 )
 from scripts.reporting_funds.oekb_csv import load_oekb_report, load_required_oekb_reports
-from scripts.reporting_funds.workflow import basis_adjustments_to_df, run_workflow
+from scripts.reporting_funds.workflow import basis_adjustments_to_df, load_opening_state_snapshot, run_workflow
 
 
 def _write_rates_csv(path: Path, rows: list[tuple[str, str, float]]) -> None:
@@ -49,6 +49,8 @@ def _write_oekb_file(
     value_10595: str = "0,0000",
     value_10288: str = "0,0000",
     value_10289: str = "0,0000",
+    value_10759: str = "0,0000",
+    value_10760: str = "0,0000",
     value_10047: str = "",
     value_10055: str = "",
     currency: str = "USD",
@@ -82,6 +84,8 @@ def _write_oekb_file(
                 f"Nicht gemeldete Ausschüttungen;{value_10595};{value_10595};x;10595",
                 f"Anzurechnende ausländische Quellensteuer;{value_10288};{value_10288};x;10288",
                 f"Die Anschaffungskosten des Fondsanteils sind zu korrigieren um;{value_10289};{value_10289};x;10289",
+                f"Inländische Dividenden, die in den Verlustausgleich gemäß § 27 Abs. 8 EStG einbezogen werden können (Kennzahl 189);{value_10759};{value_10759};x;10759",
+                f"KESt auf inländische Dividenden, die im Rahmen des Verlustausgleichs gemäß § 27 Abs. 8 EStG berücksichtigt werden kann (Kennzahl 899);{value_10760};{value_10760};x;10760",
                 *(
                     [f"Gesamtausschüttungen;{value_10047};{value_10047};x;10047"]
                     if value_10047
@@ -124,44 +128,75 @@ def _write_tax_xml(path: Path, *, cash_rows: list[str], accrual_rows: list[str])
 
 def _write_opening_lots_csv(path: Path, rows: list[dict[str, object]]) -> None:
     header = (
-        "snapshot_date,asset_class,ticker,isin,lot_id,buy_date,original_quantity,remaining_quantity,"
-        "currency,buy_price_ccy,buy_fx_to_eur,original_cost_eur,cumulative_oekb_stepup_eur,adjusted_basis_eur,"
-        "status,broker,account_id,notes,last_adjustment_year,last_adjustment_reference,last_sale_date,"
-        "sold_quantity_ytd,source_trade_id,source_statement_file\n"
+        "snapshot_date,broker,ticker,isin,currency,asset_class,quantity,base_cost_total_eur,"
+        "basis_adjustment_total_eur,total_basis_eur,average_basis_eur,status,last_event_date,basis_method,"
+        "notes,source_file\n"
     )
     body = "".join(
         ",".join(
             [
                 str(row["snapshot_date"]),
-                str(row.get("asset_class", "ETF")),
+                str(row.get("broker", "ibkr")),
                 str(row["ticker"]),
                 str(row["isin"]),
-                str(row["lot_id"]),
-                str(row["buy_date"]),
-                str(row["original_quantity"]),
-                str(row["remaining_quantity"]),
                 str(row["currency"]),
-                str(row["buy_price_ccy"]),
-                str(row["buy_fx_to_eur"]),
-                str(row["original_cost_eur"]),
-                str(row.get("cumulative_oekb_stepup_eur", 0.0)),
-                str(row.get("adjusted_basis_eur", row["original_cost_eur"])),
+                str(row.get("asset_class", "ETF")),
+                str(row.get("quantity", row.get("remaining_quantity", row.get("original_quantity", 0.0)))),
+                str(row.get("base_cost_total_eur", row.get("original_cost_eur", 0.0))),
+                str(row.get("basis_adjustment_total_eur", row.get("cumulative_oekb_stepup_eur", 0.0))),
+                str(
+                    row.get(
+                        "total_basis_eur",
+                        row.get("adjusted_basis_eur")
+                        if "adjusted_basis_eur" in row
+                        else row.get("base_cost_total_eur", row.get("original_cost_eur", 0.0))
+                        + row.get("basis_adjustment_total_eur", row.get("cumulative_oekb_stepup_eur", 0.0)),
+                    )
+                ),
+                str(row.get("average_basis_eur", 0.0)),
                 str(row.get("status", "open")),
-                str(row.get("broker", "ibkr")),
-                str(row.get("account_id", "U1")),
+                str(row.get("last_event_date", row["snapshot_date"])),
+                str(row.get("basis_method", row.get("austrian_basis_method", "move_in_fmv_reset"))),
                 str(row.get("notes", "")),
-                str(row.get("last_adjustment_year", "")),
-                str(row.get("last_adjustment_reference", "")),
-                str(row.get("last_sale_date", "")),
-                str(row.get("sold_quantity_ytd", 0.0)),
-                str(row.get("source_trade_id", "")),
-                str(row.get("source_statement_file", "")),
+                str(row.get("source_file", row.get("source_statement_file", ""))),
             ]
         )
         + "\n"
         for row in rows
     )
     path.write_text(header + body, encoding="utf-8")
+
+
+def test_load_opening_state_snapshot_filters_to_requested_asset_class(tmp_path: Path) -> None:
+    opening_path = tmp_path / "opening_state.csv"
+    _write_opening_lots_csv(
+        opening_path,
+        [
+            {
+                "snapshot_date": "2024-05-01",
+                "ticker": "AAPL",
+                "isin": "US0378331005",
+                "currency": "USD",
+                "asset_class": "COMMON",
+                "quantity": 10.0,
+                "base_cost_total_eur": 1000.0,
+            },
+            {
+                "snapshot_date": "2024-05-01",
+                "ticker": "VWRL",
+                "isin": "IE00B3RBWM25",
+                "currency": "USD",
+                "asset_class": "ETF",
+                "quantity": 5.0,
+                "base_cost_total_eur": 500.0,
+            },
+        ],
+    )
+
+    states, snapshot_date = load_opening_state_snapshot(opening_path, allowed_asset_classes={"ETF"})
+
+    assert snapshot_date == date(2024, 5, 1)
+    assert [(state.ticker, state.asset_class, state.quantity) for state in states] == [("VWRL", "ETF", 5.0)]
 
 
 def _trade_row(
@@ -225,24 +260,45 @@ def _accrual_row(
     )
 
 
-def test_load_oekb_report_parses_distribution_and_annual_fields() -> None:
-    idtl = load_oekb_report(
-        next(Path("data/input/oekb/2025").glob("IDTL_Ausschu*22.12.2025.csv")),
-        tax_year=2025,
+def test_load_oekb_report_parses_distribution_and_annual_fields(tmp_path: Path) -> None:
+    idtl_path = tmp_path / "IDTL_Ausschuettungsmeldung_22.12.2025.csv"
+    spy5_path = tmp_path / "SPY5_Jahresdatenmeldung_27.10.2025.csv"
+    _write_oekb_file(
+        idtl_path,
+        isin="IE00BSKRJZ44",
+        meldedatum="22.12.2025",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="24.12.2025",
+        ex_tag="11.12.2025",
+        value_10289="-0,0735",
+        value_10759="0,0016",
+        value_10760="0,0004",
     )
-    spy5 = load_oekb_report(
-        next(Path("data/input/oekb/2025").glob("SPY5_Jahresdatenmeldung*.csv")),
-        tax_year=2025,
+    _write_oekb_file(
+        spy5_path,
+        isin="IE00B6YX5C33",
+        meldedatum="27.10.2025",
+        jahresmeldung="JA",
+        ausschuettungsmeldung="NEIN",
+        value_10595="6,3730",
+        value_10288="0,9271",
     )
+    idtl = load_oekb_report(idtl_path, tax_year=2025)
+    spy5 = load_oekb_report(spy5_path, tax_year=2025)
 
     assert idtl.is_ausschuettungsmeldung is True
     assert idtl.ex_tag == date(2025, 12, 11)
     assert idtl.ausschuettungstag == date(2025, 12, 24)
     assert idtl.acquisition_cost_correction_per_share_ccy == -0.0735
+    assert idtl.domestic_dividends_loss_offset_per_share_ccy == 0.0016
+    assert idtl.domestic_dividend_kest_per_share_ccy == 0.0004
 
     assert spy5.is_jahresmeldung is True
     assert spy5.non_reported_distribution_per_share_ccy == 6.373
     assert spy5.creditable_foreign_tax_per_share_ccy == 0.9271
+    assert spy5.domestic_dividends_loss_offset_per_share_ccy == 0.0
+    assert spy5.domestic_dividend_kest_per_share_ccy == 0.0
 
 
 def test_load_required_oekb_reports_supports_multiple_files_per_isin_and_isin_matching(tmp_path: Path) -> None:
@@ -302,6 +358,8 @@ def test_load_oekb_report_prefers_private_investor_section_in_full_export(tmp_pa
                 "Nicht gemeldete Ausschüttungen;6,3730;6,3730;x;10595",
                 "Anzurechnende ausländische Quellensteuer;0,9271;0,9271;x;10288",
                 "Die Anschaffungskosten des Fondsanteils sind zu korrigieren um;10,1944;10,1944;x;10289",
+                "Inländische Dividenden, die in den Verlustausgleich gemäß § 27 Abs. 8 EStG einbezogen werden können (Kennzahl 189);0,1234;0,1234;x;10759",
+                "KESt auf inländische Dividenden, die im Rahmen des Verlustausgleichs gemäß § 27 Abs. 8 EStG berücksichtigt werden kann (Kennzahl 899);0,0123;0,0123;x;10760",
                 "",
                 "Ertragsteuerliche Behandlung (je Anteil)",
                 "======================================",
@@ -311,6 +369,8 @@ def test_load_oekb_report_prefers_private_investor_section_in_full_export(tmp_pa
                 "16.2.1;Nicht gemeldete Ausschüttungen;999,0000;999,0000;;;;;x;10595",
                 "16.3;Anzurechnende ausländische Quellensteuer;999,0000;999,0000;;;;;x;10288",
                 "16.4;Anschaffungskostenkorrektur;999,0000;999,0000;;;;;x;10289",
+                "16.5;Inländische Dividenden;999,0000;999,0000;;;;;x;10759",
+                "16.6;KESt auf inländische Dividenden;999,0000;999,0000;;;;;x;10760",
             ]
         )
         + "\n",
@@ -325,6 +385,8 @@ def test_load_oekb_report_prefers_private_investor_section_in_full_export(tmp_pa
     assert report.non_reported_distribution_per_share_ccy == 6.373
     assert report.creditable_foreign_tax_per_share_ccy == 0.9271
     assert report.acquisition_cost_correction_per_share_ccy == 10.1944
+    assert report.domestic_dividends_loss_offset_per_share_ccy == 0.1234
+    assert report.domestic_dividend_kest_per_share_ccy == 0.0123
 
 
 def test_load_required_oekb_reports_missing_file_message_includes_ticker_and_isin(tmp_path: Path) -> None:
@@ -835,10 +897,10 @@ def test_reporting_funds_allows_eur_trade_currency_with_usd_oekb_report(tmp_path
     )
 
     income_df = pl.read_csv(output_paths["income_events"])
-    ledger_df = pl.read_csv(output_paths["ledger"])
+    state_df = pl.read_csv(output_paths["state"])
 
     assert income_df.filter(pl.col("ticker") == "VWRL").height > 0
-    assert ledger_df.filter(pl.col("ticker") == "VWRL")["currency"].to_list() == ["EUR"]
+    assert state_df.filter(pl.col("ticker") == "VWRL")["currency"].to_list() == ["EUR"]
 
 
 def test_reporting_funds_carryforward_only_skips_pre_move_in_2024_activity(tmp_path: Path) -> None:
@@ -854,9 +916,9 @@ def test_reporting_funds_carryforward_only_skips_pre_move_in_2024_activity(tmp_p
             ("2024-12-27", "USD", 1.0),
         ],
     )
-    opening_lots_path = tmp_path / "opening.csv"
+    opening_state_path = tmp_path / "opening.csv"
     _write_opening_lots_csv(
-        opening_lots_path,
+        opening_state_path,
         [
             {
                 "snapshot_date": "2024-05-01",
@@ -1005,6 +1067,8 @@ def test_reporting_funds_carryforward_only_skips_pre_move_in_2024_activity(tmp_p
         value_10286="0,2593",
         value_10288="0,0303",
         value_10289="-0,0538",
+        value_10759="0,0016",
+        value_10760="0,0004",
     )
 
     output_paths = run_workflow(
@@ -1016,18 +1080,18 @@ def test_reporting_funds_carryforward_only_skips_pre_move_in_2024_activity(tmp_p
         oekb_root_dir=oekb_root,
         state_dir=tmp_path / "state",
         output_dir=tmp_path / "output",
-        opening_lots_path=opening_lots_path,
+        opening_state_path=opening_state_path,
         authoritative_start_date=date(2024, 5, 1),
         carryforward_only=True,
     )
 
-    ledger_df = pl.read_csv(output_paths["ledger"])
+    state_df = pl.read_csv(output_paths["state"])
     income_df = pl.read_csv(output_paths["income_events"])
     basis_df = pl.read_csv(output_paths["basis_adjustments"])
     payout_df = pl.read_csv(output_paths["payout_state"])
 
-    assert ledger_df["remaining_quantity"].sum() == 14.0
-    assert "pre-move-buy" not in ledger_df["source_trade_id"].to_list()
+    assert state_df["quantity"].sum() == 14.0
+    assert "seed.csv" in state_df["source_file"].to_list()
     assert income_df.is_empty()
     assert basis_df["effective_date"].to_list() == ["2024-06-26"]
     assert payout_df["payout_key"].to_list() == ["post-move-payout"]
@@ -1043,9 +1107,9 @@ def test_reporting_funds_carryforward_only_applies_basis_without_distribution_ma
             ("2024-06-26", "USD", 1.0),
         ],
     )
-    opening_lots_path = tmp_path / "opening.csv"
+    opening_state_path = tmp_path / "opening.csv"
     _write_opening_lots_csv(
-        opening_lots_path,
+        opening_state_path,
         [
             {
                 "snapshot_date": "2024-05-01",
@@ -1092,18 +1156,18 @@ def test_reporting_funds_carryforward_only_applies_basis_without_distribution_ma
         oekb_root_dir=oekb_root,
         state_dir=tmp_path / "state",
         output_dir=tmp_path / "output",
-        opening_lots_path=opening_lots_path,
+        opening_state_path=opening_state_path,
         authoritative_start_date=date(2024, 5, 1),
         carryforward_only=True,
     )
 
     income_df = pl.read_csv(output_paths["income_events"])
     basis_df = pl.read_csv(output_paths["basis_adjustments"])
-    ledger_df = pl.read_csv(output_paths["ledger"])
+    state_df = pl.read_csv(output_paths["state"])
 
     assert income_df.is_empty()
     assert basis_df.is_empty()
-    assert ledger_df["cumulative_oekb_stepup_eur"].to_list() == [0.0]
+    assert state_df["basis_adjustment_total_eur"].to_list() == [0.0]
 
 
 def test_reporting_funds_2025_uses_2024_carryforward_ledger_once(tmp_path: Path) -> None:
@@ -1118,9 +1182,9 @@ def test_reporting_funds_2025_uses_2024_carryforward_ledger_once(tmp_path: Path)
             ("2025-01-15", "USD", 1.0),
         ],
     )
-    opening_lots_path = tmp_path / "opening.csv"
+    opening_state_path = tmp_path / "opening.csv"
     _write_opening_lots_csv(
-        opening_lots_path,
+        opening_state_path,
         [
             {
                 "snapshot_date": "2024-05-01",
@@ -1236,7 +1300,7 @@ def test_reporting_funds_2025_uses_2024_carryforward_ledger_once(tmp_path: Path)
         oekb_root_dir=oekb_root,
         state_dir=state_dir,
         output_dir=tmp_path / "output_2024",
-        opening_lots_path=opening_lots_path,
+        opening_state_path=opening_state_path,
         authoritative_start_date=date(2024, 5, 1),
         carryforward_only=True,
     )
@@ -1253,11 +1317,11 @@ def test_reporting_funds_2025_uses_2024_carryforward_ledger_once(tmp_path: Path)
     )
 
     basis_df = pl.read_csv(output_paths["basis_adjustments"])
-    ledger_df = pl.read_csv(output_paths["ledger"])
+    state_df = pl.read_csv(output_paths["state"])
 
     assert basis_df["effective_date"].to_list() == ["2025-01-15"]
     assert basis_df["shares_held_on_eligibility_date"].to_list() == [14.0]
-    assert ledger_df["remaining_quantity"].sum() == 14.0
+    assert state_df["quantity"].sum() == 14.0
 
 
 def test_reporting_funds_workflow_resolves_same_year_distribution_and_writes_payout_state(tmp_path: Path) -> None:
@@ -1343,6 +1407,8 @@ def test_reporting_funds_workflow_resolves_same_year_distribution_and_writes_pay
         value_10287="0,0120",
         value_10288="0,0030",
         value_10289="-0,0735",
+        value_10759="0,0015",
+        value_10760="0,0004",
     )
 
     output_paths = run_workflow(
@@ -1363,6 +1429,8 @@ def test_reporting_funds_workflow_resolves_same_year_distribution_and_writes_pay
     income_df = pl.read_csv(output_paths["income_events"])
     deemed_row = income_df.filter(pl.col("event_type") == "oekb_deemed_distribution_10287").to_dicts()[0]
     credit_row = income_df.filter(pl.col("event_type") == "oekb_creditable_foreign_tax_10288").to_dicts()[0]
+    domestic_dividend_row = income_df.filter(pl.col("event_type") == "oekb_domestic_dividends_10759").to_dicts()[0]
+    domestic_kest_row = income_df.filter(pl.col("event_type") == "oekb_domestic_dividend_kest_10760").to_dicts()[0]
 
     assert payout_state_df["status"].to_list() == ["resolved_same_year_distribution"]
     assert resolution_df["resolution_mode"].to_list() == ["matched_same_year_distribution"]
@@ -1374,6 +1442,13 @@ def test_reporting_funds_workflow_resolves_same_year_distribution_and_writes_pay
     assert credit_row["event_date"] == "2025-12-24"
     assert credit_row["eligibility_date"] == "2025-12-11"
     assert credit_row["creditable_foreign_tax_total_ccy"] == 0.03
+    assert domestic_dividend_row["event_date"] == "2025-12-24"
+    assert domestic_dividend_row["eligibility_date"] == "2025-12-11"
+    assert domestic_dividend_row["amount_total_ccy"] == 0.015
+    assert domestic_kest_row["event_date"] == "2025-12-24"
+    assert domestic_kest_row["eligibility_date"] == "2025-12-11"
+    assert domestic_kest_row["domestic_dividend_kest_total_ccy"] == 0.004
+    assert domestic_kest_row["creditable_foreign_tax_total_ccy"] == 0.0
 
     second_output_paths = run_workflow(
         person="eugene",
@@ -1707,7 +1782,9 @@ def test_reporting_funds_workflow_reconciles_negative_deemed_distribution_to_uni
     _write_rates_csv(
         rates_path,
         [
+            ("2023-09-01", "USD", 1.0),
             ("2023-09-27", "USD", 1.0),
+            ("2023-10-15", "USD", 1.0),
             ("2023-12-27", "USD", 1.0),
             ("2024-03-27", "USD", 1.0),
             ("2024-06-01", "USD", 1.0),
@@ -2477,6 +2554,8 @@ def test_reporting_funds_workflow_keeps_broker_cash_payout_when_annual_period_do
         value_10288="0,9271",
         value_10595="6,3730",
         value_10289="10,1944",
+        value_10759="0,5000",
+        value_10760="0,2000",
     )
 
     output_paths = run_workflow(
@@ -2515,13 +2594,21 @@ def test_reporting_funds_workflow_keeps_broker_cash_payout_when_annual_period_do
     ].sum()
     assert f"`ETF distributions 27.5%`: `{filing_distribution_total_eur:.6f} EUR`" in summary_text
     assert f"`Ausschüttungsgleiche Erträge 27.5%`: `{filing_deemed_total_eur:.6f} EUR`" in summary_text
+    assert "`Domestic dividends in loss offset (KZ 189)`: `1.250000 EUR`" in summary_text
+    assert "`Austrian KESt on domestic dividends (KZ 899)`: `0.500000 EUR`" in summary_text
     assert "`Creditable foreign tax`: `2.317750 EUR`" in summary_text
-    assert "`diagnostic_total_income_eur`: `32.169500 EUR`" in summary_text
-    assert "open lots `1`, open quantity `2.5`, original basis `250.000000 EUR`" in summary_text
-    assert "OeKB basis adjustment `25.486000 EUR`, adjusted basis `275.486000 EUR`" in summary_text
+    assert "`diagnostic_total_income_eur`: `33.419500 EUR`" in summary_text
+    assert "`diagnostic_total_domestic_dividend_kest_eur`: `0.500000 EUR`" in summary_text
+    assert "open positions `1`, open quantity `2.5`, base cost `250.000000 EUR`" in summary_text
+    assert "OeKB basis adjustment `25.486000 EUR`, total basis `275.486000 EUR`" in summary_text
     assert "## Next Reporting Period Inputs" in summary_text
-    assert "`" + str((tmp_path / "state" / "fund_tax_ledger_2025_final.csv").as_posix()) + "`" in summary_text
+    assert "`" + str((tmp_path / "state" / "fund_tax_state_2025_final.csv").as_posix()) + "`" in summary_text
     assert "`" + str((tmp_path / "state" / "fund_tax_payout_state.csv").as_posix()) + "`" in summary_text
+    assert income_df.filter(pl.col("event_type") == "oekb_domestic_dividends_10759")["amount_total_eur"].sum() == 1.25
+    assert income_df.filter(pl.col("event_type") == "oekb_domestic_dividend_kest_10760")[
+        "domestic_dividend_kest_total_eur"
+    ].sum() == 0.5
+    assert income_df["creditable_foreign_tax_total_eur"].sum() == 2.31775
 
 
 def test_reporting_funds_workflow_defers_distribution_report_without_confirmed_cash(tmp_path: Path) -> None:

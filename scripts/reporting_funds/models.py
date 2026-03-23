@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from src.tax_lots import round_money, round_qty
+from src.broker_history import round_money, round_qty
 
 
 def _append_unique_note_text(existing: str, incoming: str) -> str:
@@ -57,6 +57,8 @@ class OekbReport:
     creditable_foreign_tax_per_share_ccy: float
     acquisition_cost_correction_per_share_ccy: float
     source_file: str
+    domestic_dividends_loss_offset_per_share_ccy: float = 0.0
+    domestic_dividend_kest_per_share_ccy: float = 0.0
     total_shares_at_inflow: float | None = None
     total_distributions_per_share_ccy: float | None = None
     capital_repayment_per_share_ccy: float | None = None

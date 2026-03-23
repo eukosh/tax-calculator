@@ -10,21 +10,24 @@ DEFAULT_PERSON = "eugene"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate reporting-fund ETF ledger and OeKB event artifacts.")
+    parser = argparse.ArgumentParser(description="Generate reporting-fund ETF state, OeKB event, and filing artifacts.")
     parser.add_argument("--person", default=DEFAULT_PERSON, help="Person key, for example eugene or oryna.")
     parser.add_argument("--tax-year", type=int, required=True)
     parser.add_argument("--ibkr-tax-xml-path", required=True)
     parser.add_argument(
         "--historical-ibkr-tax-xml-path",
-        help="Optional additional IBKR tax XML file, directory, or glob used only as lookup-only historical payout evidence.",
+        help=(
+            "Optional additional IBKR tax XML file, directory, or glob used only as lookup-only historical payout "
+            "evidence. Providing broad history is strongly recommended."
+        ),
     )
     parser.add_argument("--ibkr-trade-history-path")
     parser.add_argument("--oekb-root-dir")
     parser.add_argument("--state-dir")
     parser.add_argument("--output-dir")
     parser.add_argument(
-        "--opening-lots-path",
-        help="Optional CSV snapshot used as the opening Austrian lot state for the first bootstrap-based run.",
+        "--opening-state-path",
+        help="Optional CSV snapshot used as the opening Austrian ETF tax state for the first bootstrap-based run.",
     )
     parser.add_argument(
         "--authoritative-start-date",
@@ -33,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--carryforward-only",
         action="store_true",
-        help="Reconstruct year-end ledger/state for carryforward purposes without treating the run as a normal filing year.",
+        help="Reconstruct year-end ETF state for carryforward purposes without treating the run as a normal filing year.",
     )
     parser.add_argument("--resolution-cutoff-date", help="Optional YYYY-MM-DD cutoff for next-year OeKB lookahead.")
     parser.add_argument(
@@ -85,7 +88,7 @@ def main() -> None:
         resolution_cutoff_date=args.resolution_cutoff_date,
         strict_unresolved_payouts=not args.allow_unresolved_payouts,
         negative_deemed_income_overrides_path=args.negative_deemed_income_overrides_path,
-        opening_lots_path=args.opening_lots_path,
+        opening_state_path=args.opening_state_path,
         authoritative_start_date=(
             date.fromisoformat(args.authoritative_start_date) if args.authoritative_start_date else None
         ),

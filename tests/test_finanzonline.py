@@ -22,12 +22,12 @@ from src.finanzonline import (
     LOSS_OFFSET_METHOD_PROPORTIONAL,
     ORDINARY_CAPITAL_INCOME_LABEL,
     ORDINARY_INCOME_BUCKET_CATEGORY,
+    PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL,
     TRADE_LOSS_BUCKET_CATEGORY,
     TRADE_LOSS_LABEL,
     TRADE_PROFIT_BUCKET_CATEGORY,
     TRADE_PROFIT_LABEL,
     WITHHELD_FOREIGN_TAX_LABEL,
-    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
     build_finanzonline_buckets_from_provider_summaries,
     build_finanzonline_report,
 )
@@ -106,20 +106,20 @@ def test_build_finanzonline_buckets_from_provider_summaries_and_report():
                 TRADE_LOSS_LABEL,
                 ETF_DISTRIBUTIONS_LABEL,
                 WITHHELD_FOREIGN_TAX_LABEL,
+                PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL,
                 CREDITABLE_FOREIGN_TAX_LABEL,
             ],
-            AMOUNT_EUR_COL: [170.0, 30.0, -5.0, 110.0, 26.0, 23.25],
+            AMOUNT_EUR_COL: [130.0, 70.0, -5.0, 110.0, 26.0, 23.25, 23.25],
         }
     )
     expected_estimate_df = pl.DataFrame(
         {
             ESTIMATE_LABEL_COL: [
-                WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                 CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                 ESTIMATED_BASE_LABEL,
                 ESTIMATED_TAX_LABEL,
             ],
-            AMOUNT_EUR_COL: [26.0, 23.25, 305.0, 60.625],
+            AMOUNT_EUR_COL: [23.25, 305.0, 60.625],
         }
     )
 
@@ -172,9 +172,10 @@ def test_build_finanzonline_report_favorable_allocates_losses_to_zero_credit_inc
                     TRADE_LOSS_LABEL,
                     ETF_DISTRIBUTIONS_LABEL,
                     WITHHELD_FOREIGN_TAX_LABEL,
+                    PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL,
                     CREDITABLE_FOREIGN_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [150.0, 0.0, -100.0, 0.0, 15.0, 7.5],
+                AMOUNT_EUR_COL: [150.0, 0.0, -100.0, 0.0, 15.0, 15.0, 7.5],
             }
         ),
     )
@@ -183,12 +184,11 @@ def test_build_finanzonline_report_favorable_allocates_losses_to_zero_credit_inc
         pl.DataFrame(
             {
                 ESTIMATE_LABEL_COL: [
-                    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                     CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                     ESTIMATED_BASE_LABEL,
                     ESTIMATED_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [15.0, 7.5, 50.0, 6.25],
+                AMOUNT_EUR_COL: [7.5, 50.0, 6.25],
             }
         ),
     )
@@ -234,12 +234,11 @@ def test_build_finanzonline_report_proportional_matches_accepted_simplification(
         pl.DataFrame(
             {
                 ESTIMATE_LABEL_COL: [
-                    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                     CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                     ESTIMATED_BASE_LABEL,
                     ESTIMATED_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [15.0, 5.0, 50.0, 8.75],
+                AMOUNT_EUR_COL: [5.0, 50.0, 8.75],
             }
         ),
     )
@@ -285,12 +284,11 @@ def test_build_finanzonline_report_keeps_full_credit_when_zero_credit_income_abs
         pl.DataFrame(
             {
                 ESTIMATE_LABEL_COL: [
-                    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                     CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                     ESTIMATED_BASE_LABEL,
                     ESTIMATED_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [15.0, 15.0, 250.0, 53.75],
+                AMOUNT_EUR_COL: [15.0, 250.0, 53.75],
             }
         ),
     )
@@ -333,9 +331,10 @@ def test_build_finanzonline_report_zeroes_credit_when_losses_eliminate_all_posit
                     TRADE_LOSS_LABEL,
                     ETF_DISTRIBUTIONS_LABEL,
                     WITHHELD_FOREIGN_TAX_LABEL,
+                    PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL,
                     CREDITABLE_FOREIGN_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [0.0, 0.0, -100.0, 100.0, 15.0, 0.0],
+                AMOUNT_EUR_COL: [0.0, 0.0, -100.0, 100.0, 15.0, 15.0, 0.0],
             }
         ),
     )
@@ -344,12 +343,11 @@ def test_build_finanzonline_report_zeroes_credit_when_losses_eliminate_all_posit
         pl.DataFrame(
             {
                 ESTIMATE_LABEL_COL: [
-                    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                     CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                     ESTIMATED_BASE_LABEL,
                     ESTIMATED_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [15.0, 0.0, 0.0, 0.0],
+                AMOUNT_EUR_COL: [0.0, 0.0, 0.0],
             }
         ),
     )
@@ -380,12 +378,11 @@ def test_build_finanzonline_report_only_losses_no_positive_income():
         pl.DataFrame(
             {
                 ESTIMATE_LABEL_COL: [
-                    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                     CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                     ESTIMATED_BASE_LABEL,
                     ESTIMATED_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [0.0, 0.0, 0.0, 0.0],
+                AMOUNT_EUR_COL: [0.0, 0.0, 0.0],
             }
         ),
     )
@@ -424,12 +421,11 @@ def test_build_finanzonline_report_losses_exactly_equal_positive_income():
         pl.DataFrame(
             {
                 ESTIMATE_LABEL_COL: [
-                    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                     CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                     ESTIMATED_BASE_LABEL,
                     ESTIMATED_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [15.0, 0.0, 0.0, 0.0],
+                AMOUNT_EUR_COL: [0.0, 0.0, 0.0],
             }
         ),
     )
@@ -486,12 +482,11 @@ def test_build_finanzonline_report_multiple_loss_buckets():
         pl.DataFrame(
             {
                 ESTIMATE_LABEL_COL: [
-                    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                     CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                     ESTIMATED_BASE_LABEL,
                     ESTIMATED_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [30.0, 30.0, 220.0, 30.5],
+                AMOUNT_EUR_COL: [30.0, 220.0, 30.5],
             }
         ),
     )
@@ -507,12 +502,11 @@ def test_build_finanzonline_report_multiple_loss_buckets():
         pl.DataFrame(
             {
                 ESTIMATE_LABEL_COL: [
-                    WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                     CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                     ESTIMATED_BASE_LABEL,
                     ESTIMATED_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [30.0, 22.0, 220.0, 38.5],
+                AMOUNT_EUR_COL: [22.0, 220.0, 38.5],
             }
         ),
     )
@@ -548,9 +542,10 @@ def test_build_finanzonline_report_trades_zero_amount_classified_as_profit():
                     TRADE_LOSS_LABEL,
                     ETF_DISTRIBUTIONS_LABEL,
                     WITHHELD_FOREIGN_TAX_LABEL,
+                    PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL,
                     CREDITABLE_FOREIGN_TAX_LABEL,
                 ],
-                AMOUNT_EUR_COL: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                AMOUNT_EUR_COL: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             }
         ),
     )

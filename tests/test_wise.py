@@ -74,7 +74,7 @@ def test_process_wise_euro(rates_df):
 
 def test_process_wise_euro_2025_real_file(rates_df_2025):
     res_df = process_wise_statement(
-        "data/input/oryna/2025/wise_euro.csv",
+        "data/input/oryna/2025/wise_EUR_2025-01-01_2025-12-31.csv",
         rates_df_2025,
         start_date=REPORTING_PERIOD_START_DATE_2025,
         end_date=REPORTING_PERIOD_START_END_2025,
@@ -97,7 +97,7 @@ def test_process_wise_euro_2025_real_file(rates_df_2025):
 
 def test_process_wise_usd_2025_real_file(rates_df_2025):
     res_df = process_wise_statement(
-        "data/input/oryna/2025/wise_usd.csv",
+        "data/input/oryna/2025/wise_USD_2025-01-01_2025-12-31.csv",
         rates_df_2025,
         start_date=REPORTING_PERIOD_START_DATE_2025,
         end_date=REPORTING_PERIOD_START_END_2025,

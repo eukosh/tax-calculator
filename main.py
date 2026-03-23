@@ -24,7 +24,8 @@ from src.providers.ibkr import (
 )
 from src.providers.revolut import process_revolut_savings_statement
 from src.providers.wise import process_wise_statement
-from src.tax_lots import load_ibkr_stock_like_trades, load_opening_tax_lots
+from src.broker_history import load_ibkr_stock_like_trades
+from src.moving_average import load_position_states
 from src.utils import has_rows
 from src.writer import ReportRunLayout
 
@@ -48,8 +49,8 @@ ibkr_input_path = [
 ]
 
 ibkr_trade_history_path: str | None = f"data/input/{person}/ibkr/trades/*.xml"
-austrian_opening_lots_path: str | None = (
-    "data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv" if person == "eugene" else None
+austrian_opening_state_path: str | None = (
+    "data/input/eugene/ibkr/austrian_opening_state_2024-05-01.csv" if person == "eugene" else None
 )
 authoritative_start_date: date | None = date(2024, 5, 1) if person == "eugene" else None
 freedom_input_path = (
@@ -73,18 +74,20 @@ def _existing_first_or_none(*file_paths: str) -> str | None:
 def _infer_ibkr_authoritative_rates_start_date(
     *,
     ibkr_trade_history_path: str | None,
-    austrian_opening_lots_path: str | None,
+    austrian_opening_state_path: str | None,
 ) -> date | None:
     candidate_dates: list[date] = []
 
-    if austrian_opening_lots_path:
-        _, snapshot_date = load_opening_tax_lots(
-            austrian_opening_lots_path,
-            allowed_asset_classes=AUTHORITATIVE_STOCK_LIKE_SUBCATEGORIES,
-        )
-        candidate_dates.append(snapshot_date)
+    if austrian_opening_state_path:
+        opening_states = [
+            state
+            for state in load_position_states(austrian_opening_state_path)
+            if state.asset_class in AUTHORITATIVE_STOCK_LIKE_SUBCATEGORIES and state.snapshot_date
+        ]
+        if opening_states:
+            candidate_dates.append(min(date.fromisoformat(state.snapshot_date) for state in opening_states))
 
-    if ibkr_trade_history_path and not austrian_opening_lots_path:
+    if ibkr_trade_history_path and not austrian_opening_state_path:
         raw_trades = load_ibkr_stock_like_trades(
             ibkr_trade_history_path,
             allowed_asset_classes=AUTHORITATIVE_STOCK_LIKE_SUBCATEGORIES,
@@ -116,7 +119,7 @@ if __name__ == "__main__":
         rates_start_date = reporting_start_date
     ibkr_authoritative_rates_start_date = _infer_ibkr_authoritative_rates_start_date(
         ibkr_trade_history_path=ibkr_trade_history_path,
-        austrian_opening_lots_path=austrian_opening_lots_path,
+        austrian_opening_state_path=austrian_opening_state_path,
     )
     if ibkr_authoritative_rates_start_date and ibkr_authoritative_rates_start_date < rates_start_date:
         rates_start_date = ibkr_authoritative_rates_start_date
@@ -139,14 +142,13 @@ if __name__ == "__main__":
     wise_summary_df: pl.DataFrame | None = None
 
     # ------- IBKR
-    trades_tax_df, trades_summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=ibkr_input_path,
+    stock_sales_df, trades_summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
         separate_trade_profit_loss=ibkr_calculate_trade_profit_loss_separately,
         excluded_trade_subcategories={"ETF"},
-        austrian_opening_lots_path=austrian_opening_lots_path,
+        austrian_opening_state_path=austrian_opening_state_path,
         ibkr_trade_history_path=ibkr_trade_history_path,
         authoritative_start_date=authoritative_start_date,
     )
@@ -163,6 +165,7 @@ if __name__ == "__main__":
         exchange_rates_df=rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
+        ibkr_trade_history_path=ibkr_trade_history_path,
     )
 
     ibkr_writer = run_layout.writer("ibkr", reporting_start_date, reporting_end_date)
@@ -173,41 +176,12 @@ if __name__ == "__main__":
         ibkr_writer.write_csv(bonds_tax_df, "bonds_tax_df.csv")
     if has_rows(bonds_tax_country_agg_df):
         ibkr_writer.write_csv(bonds_tax_country_agg_df, "bonds_tax_country_agg_df.csv")
-    if has_rows(trades_tax_df):
-        ibkr_writer.write_csv(trades_tax_df, "trades_tax_df.csv")
-        if has_rows(trades_reconciliation_df):
-            reconciliation_cols = [
-                "sale_trade_id",
-                "sale_date",
-                "sale_datetime",
-                "ticker",
-                "isin",
-                "lot_id",
-                "lot_buy_date",
-                "lot_buy_datetime",
-                "quantity_from_lot",
-                "basis_origin",
-                "reconciliation_segment",
-                "reconciliation_status",
-                "sale_aggregate_status",
-                "sale_aggregate_quantity_internal",
-                "sale_aggregate_quantity_broker",
-                "sale_proceeds_eur_internal",
-                "sale_proceeds_eur_broker_adjusted",
-                "reconciliation_notes",
-            ]
-            ibkr_writer.write_csv(
-                trades_reconciliation_df.select(
-                    [col for col in reconciliation_cols if col in trades_reconciliation_df.columns]
-                ),
-                "trades_reconciliation.csv",
-            )
-    if stock_lot_state_df is not None:
-        ibkr_writer.write_csv(stock_lot_state_df, "stock_tax_lot_state_full.csv")
-        ibkr_writer.write_csv(
-            stock_lot_state_df.filter(pl.col("remaining_quantity") > 0),
-            "stock_tax_open_lots_final.csv",
-        )
+    if has_rows(stock_sales_df):
+        ibkr_writer.write_csv(stock_sales_df, "stock_tax_sales.csv")
+    if has_rows(stock_position_events_df):
+        ibkr_writer.write_csv(stock_position_events_df, "stock_tax_position_events.csv")
+    if stock_position_state_df is not None:
+        ibkr_writer.write_csv(stock_position_state_df, "stock_tax_position_state_full.csv")
 
     summary_sections = [
         IbkrSummarySection(name, df)
@@ -303,7 +277,10 @@ if __name__ == "__main__":
         end_date=reporting_end_date,
         excluded_cash_transaction_subcategories={"ETF"},
     )
-    ibkr_bond_buckets_df = build_finanzonline_buckets_from_summary_df("ibkr_bonds", bonds_tax_country_agg_df)
+    ibkr_bond_buckets_df = build_finanzonline_buckets_from_summary_df(
+        "ibkr_bonds",
+        bonds_tax_country_agg_df.with_columns(pl.lit("bonds").alias("type")) if bonds_tax_country_agg_df is not None else None,
+    )
     ibkr_trade_buckets_df = build_finanzonline_buckets_from_summary_df("ibkr_trades", trades_summary_df)
     revolut_buckets_df = build_finanzonline_buckets_from_summary_df("revolut", revolut_summary_df)
 

@@ -197,13 +197,14 @@ def test_build_opening_lot_snapshot_resets_pre_cutoff_open_stock_and_etf_lots(tm
     snapshot_df = pl.read_csv(output_path).sort(["asset_class", "ticker"])
     assert snapshot_df["ticker"].to_list() == ["AAPL", "VUSD"]
     assert snapshot_df["asset_class"].to_list() == ["COMMON", "ETF"]
-    assert snapshot_df["buy_date"].to_list() == ["2024-05-01", "2024-05-01"]
-    assert snapshot_df["remaining_quantity"].to_list() == [2.0, 7.0]
-    assert snapshot_df["original_cost_eur"].to_list() == [400.0, 840.0]
-    assert snapshot_df["austrian_basis_method"].to_list() == ["move_in_fmv_reset", "move_in_fmv_reset"]
+    assert snapshot_df["snapshot_date"].to_list() == ["2024-05-01", "2024-05-01"]
+    assert snapshot_df["quantity"].to_list() == [2.0, 7.0]
+    assert snapshot_df["base_cost_total_eur"].to_list() == [400.0, 840.0]
+    assert snapshot_df["basis_method"].to_list() == ["move_in_fmv_reset", "move_in_fmv_reset"]
+    assert snapshot_df["average_basis_eur"].to_list() == [200.0, 120.0]
 
 
-def test_build_opening_lot_snapshot_keeps_broker_gross_cost_and_fee_provenance_separately(tmp_path: Path) -> None:
+def test_build_opening_lot_snapshot_emits_aggregated_moving_average_state(tmp_path: Path) -> None:
     rates_path = tmp_path / "rates.csv"
     _write_rates_csv(
         rates_path,
@@ -249,10 +250,11 @@ def test_build_opening_lot_snapshot_keeps_broker_gross_cost_and_fee_provenance_s
     )
 
     snapshot_df = pl.read_csv(output_path)
-    assert snapshot_df["original_cost_eur"].to_list() == [400.0]
-    assert snapshot_df["buy_fee_eur_total"].to_list() == [0.0]
-    assert snapshot_df["broker_original_cost_eur"].to_list() == [340.0]
-    assert snapshot_df["broker_buy_fee_eur"].to_list() == [1.25]
+    assert snapshot_df["base_cost_total_eur"].to_list() == [400.0]
+    assert snapshot_df["quantity"].to_list() == [2.0]
+    assert snapshot_df["basis_adjustment_total_eur"].to_list() == [0.0]
+    assert snapshot_df["average_basis_eur"].to_list() == [200.0]
+    assert snapshot_df["basis_method"].to_list() == ["move_in_fmv_reset"]
 
 
 def test_build_opening_lot_snapshot_writes_price_template_when_prices_are_missing(tmp_path: Path) -> None:
@@ -308,7 +310,7 @@ def test_build_opening_lot_snapshot_writes_price_template_when_prices_are_missin
 
     template_df = pl.read_csv(template_path).sort(["asset_class", "ticker"])
     assert template_df["ticker"].to_list() == ["AAPL", "VUSD"]
-    assert template_df["remaining_quantity"].to_list() == [2.0, 10.0]
+    assert template_df["quantity"].to_list() == [2.0, 10.0]
     assert template_df["cutoff_date"].to_list() == ["2024-05-01", "2024-05-01"]
 
 
@@ -359,14 +361,14 @@ def test_reporting_funds_workflow_can_seed_from_opening_lot_snapshot(tmp_path: P
             ("VUSD", "IE00B3XXRP09", cutoff_date.isoformat(), 100.0, "USD"),
         ],
     )
-    opening_lots_path = tmp_path / "opening_lots.csv"
+    opening_state_path = tmp_path / "opening_lots.csv"
     build_opening_lot_snapshot(
         person="eugene",
         cutoff_date=cutoff_date,
         ibkr_trade_history_path=trade_history_path,
         raw_exchange_rates_path=rates_path,
         move_in_price_csv_path=prices_path,
-        output_path=opening_lots_path,
+        output_path=opening_state_path,
     )
 
     tax_xml_path = tmp_path / "tax.xml"
@@ -391,12 +393,12 @@ def test_reporting_funds_workflow_can_seed_from_opening_lot_snapshot(tmp_path: P
         state_dir=tmp_path / "state",
         output_dir=tmp_path / "output",
         strict_unresolved_payouts=False,
-        opening_lots_path=opening_lots_path,
+        opening_state_path=opening_state_path,
     )
 
     basis_df = pl.read_csv(output_paths["basis_adjustments"])
-    ledger_df = pl.read_csv(output_paths["ledger"]).sort(["buy_date", "lot_id"])
+    ledger_df = pl.read_csv(output_paths["state"]).sort(["ticker", "isin"])
 
     assert basis_df["shares_held_on_eligibility_date"].to_list() == [14.0]
-    assert ledger_df["remaining_quantity"].to_list() == [10.0, 4.0]
-    assert ledger_df["original_cost_eur"].to_list() == [1000.0, 360.0]
+    assert ledger_df["quantity"].to_list() == [14.0]
+    assert ledger_df["base_cost_total_eur"].to_list() == [1360.0]

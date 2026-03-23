@@ -50,7 +50,7 @@ Put them under:
 
 Important:
 
-- `ibkr_input_path` is used for dividends, withholding tax, bonds, and broker sale reconciliation
+- `ibkr_input_path` is used for dividends, withholding tax, and bonds
 - because of that, `ibkr_input_path` must cover the full filing year
 - this can be:
   - one yearly XML file
@@ -63,15 +63,15 @@ Important:
 
 If you are `eugene`, also make sure this file exists:
 
-- `data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv`
+- `data/input/eugene/ibkr/austrian_opening_state_2024-05-01.csv`
 
 Reason:
 
 - Eugene became Austrian tax resident on `2024-05-01`
 - pre-move broker buy prices are not the Austrian tax basis for pre-move holdings
-- the opening-lot CSV is the Austrian starting basis
+- the opening-state CSV is the Austrian starting basis
 
-If you are `oryna` and all relevant buys are post-move, there should be no opening-lot file for this part.
+If you are `oryna` and all relevant buys are post-move, there should be no opening-state file for this part.
 
 ### Step 3: Configure `main.py`
 
@@ -87,19 +87,19 @@ Set:
 - `reporting_start_date`
 - `reporting_end_date`
 
-Set the opening-lot fields like this:
+Set the opening-state fields like this:
 
 For Eugene:
 
 ```python
-austrian_opening_lots_path = "data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv"
+austrian_opening_state_path = "data/input/eugene/ibkr/austrian_opening_state_2024-05-01.csv"
 authoritative_start_date = date(2024, 5, 1)
 ```
 
 For Oryna:
 
 ```python
-austrian_opening_lots_path = None
+austrian_opening_state_path = None
 authoritative_start_date = None
 ```
 
@@ -107,7 +107,7 @@ Important:
 
 - `ibkr_trade_history_path` is required
 - `ibkr_input_path` must include all IBKR tax XML files needed to cover the filing year for dividends/cash/bonds
-- `authoritative_start_date` only makes sense together with an opening-lot snapshot
+- `authoritative_start_date` only makes sense together with an opening-state snapshot
 
 ### Step 4: Run the core app
 
@@ -125,14 +125,12 @@ Look under:
 
 The most important files are:
 
-- `trades_tax_df__<start>_<end>.csv`
-  Use this to see the actual taxable stock/ADR/REIT sale results.
-- `trades_reconciliation__<start>_<end>.csv`
-  Use this to confirm the sale events matched broker data correctly.
-- `stock_tax_lot_state_full__<start>_<end>.csv`
-  Use this to see all lots after the run, including closed and open ones.
-- `stock_tax_open_lots_final__<start>_<end>.csv`
-  Use this to see what is still open after the run.
+- `stock_tax_sales__<start>_<end>.csv`
+  Use this to see the realized taxable stock/ADR/REIT sale results.
+- `stock_tax_position_events__<start>_<end>.csv`
+  Use this as the chronological audit trail of stock position changes.
+- `stock_tax_position_state_full__<start>_<end>.csv`
+  Use this to see the full year-end moving-average position state.
 - `dividends_country_agg__<start>_<end>.csv`
   Use this to review ordinary non-ETF IBKR dividends by country.
 - `ibkr_summary__<start>_<end>.csv`
@@ -153,9 +151,9 @@ These are the helper outputs for entering the final numbers into FinanzOnline.
 
 For stock sales:
 
-- if you are Eugene, pre-move holdings sold later should show `basis_origin = snapshot`
-- if you are Oryna, normal post-move lots should show `basis_origin = post_move_buy`
-- `trades_reconciliation` should show `matched` for rows that should match broker basis exactly
+- `stock_tax_sales` should contain one row per realized sale execution
+- `stock_tax_position_events` should show a clean chronological audit trail per security
+- `stock_tax_position_state_full` should match your expected year-end remaining positions and average basis
 
 If that does not look right, stop and inspect the inputs before filing.
 
@@ -170,12 +168,24 @@ Do not rely on the core app for these.
 You need:
 
 - the yearly IBKR tax XML for the filing year
+- as much historical IBKR tax XML as you have
 - raw IBKR ETF trade history
 
 Put them under:
 
 - yearly tax XML: `data/input/<person>/<year>/`
 - raw trade history: `data/input/<person>/ibkr/trades/`
+
+Strong recommendation:
+
+- give the ETF workflow broad historical IBKR tax XML coverage, not just the target year
+- give it full raw ETF trade history
+
+Reason:
+
+- payout resolution can need older broker evidence
+- negative `10287` reconciliation can need older payout rows
+- broader history avoids unnecessary manual-review blockers
 
 ### Step 2: Collect the OeKB reports
 
@@ -195,9 +205,9 @@ Very important:
 
 ### Step 3: Special rule for Eugene
 
-If you are `eugene`, the ETF workflow can also use the Austrian opening-lot snapshot at move-in:
+If you are `eugene`, the ETF workflow can also use the Austrian opening-state snapshot at move-in:
 
-- `data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv`
+- `data/input/eugene/ibkr/austrian_opening_state_2024-05-01.csv`
 
 This matters when bootstrapping Austrian ETF state after the move.
 
@@ -210,7 +220,7 @@ poetry run python -m scripts.reporting_funds.cli \
   --person eugene \
   --tax-year 2025 \
   --ibkr-tax-xml-path data/input/eugene/2025/ibkr_20250101_20260101.xml \
-  --historical-ibkr-tax-xml-path 'data/input/eugene/202[34]/ibkr_*.xml' \
+  --historical-ibkr-tax-xml-path 'data/input/eugene/202[34]/*.xml' \
   --ibkr-trade-history-path data/input/eugene/ibkr/trades \
   --oekb-root-dir data/input/oekb
 ```
@@ -221,10 +231,11 @@ Bootstrap / move-in carryforward example for Eugene:
 poetry run python -m scripts.reporting_funds.cli \
   --person eugene \
   --tax-year 2024 \
-  --ibkr-tax-xml-path data/input/eugene/2024/ibkr_20250101_20241231.xml \
+  --ibkr-tax-xml-path data/input/eugene/2024 \
+  --historical-ibkr-tax-xml-path 'data/input/eugene/202[34]/*.xml' \
   --ibkr-trade-history-path data/input/eugene/ibkr/trades \
   --oekb-root-dir data/input/oekb \
-  --opening-lots-path data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv \
+  --opening-state-path data/input/eugene/ibkr/austrian_opening_state_2024-05-01.csv \
   --authoritative-start-date 2024-05-01 \
   --resolution-cutoff-date 2024-12-31 \
   --carryforward-only
@@ -247,8 +258,10 @@ The most important files are:
   OeKB basis corrections that affect future ETF sales.
 - `fund_tax_sales_<year>.csv`
   ETF sale allocations.
-- `fund_tax_ledger_<year>_final.csv`
-  The ETF carryforward lot ledger.
+- `fund_tax_events_<year>.csv`
+  The chronological ETF position-event audit trail.
+- `fund_tax_state_<year>_final.csv`
+  The ETF carryforward state snapshot.
 - `fund_tax_payout_state.csv`
   The cross-year payout-resolution state.
 
@@ -267,6 +280,8 @@ For example, the current 2025 Eugene summary gives:
 
 - `ETF distributions 27.5%`
 - `Ausschüttungsgleiche Erträge 27.5%`
+- `Domestic dividends in loss offset (KZ 189)`
+- `Austrian KESt on domestic dividends (KZ 899)`
 - `Creditable foreign tax`
 
 Use the summary as your filing input for the reporting-fund ETF section.
@@ -275,6 +290,7 @@ Important:
 
 - `10289` basis corrections are not entered separately in the tax return
 - they only increase or decrease future ETF sale basis
+- `10759` and `10760` stay separate from the other ETF filing fields
 
 ## Part 3: Non-Reporting Funds
 
@@ -369,7 +385,7 @@ If you want the shortest possible checklist:
 1. Export the IBKR yearly tax XML and raw IBKR trade-history XML files.
 2. Put them into the right `data/input/<person>/...` folders.
 3. If you hold EU-domiciled reporting-fund ETFs, collect all relevant OeKB files too.
-4. If you are Eugene, make sure the Austrian opening-lot CSV exists and is wired into the places that need it.
+4. If you are Eugene, make sure the Austrian opening-state CSV exists and is wired into the places that need it.
 5. Run:
    - `poetry run python main.py`
    - `poetry run python -m scripts.reporting_funds.cli ...` if you have reporting-fund ETFs

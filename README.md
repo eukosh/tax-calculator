@@ -35,10 +35,10 @@ The current IBKR stock/ADR/REIT path uses one Austrian-authoritative raw-trade m
 When configured:
 
 - raw IBKR trade-history XML is required
-- the Austrian opening-lot snapshot CSV is the tax-basis authority for positions already held at move-in
+- the Austrian opening-state CSV is the tax-basis authority for positions already held at move-in
 - raw IBKR trade-history XML is replayed internally after the authoritative start date
-- broker closed-lot XML is used only for reconciliation
-- if there were no pre-move open lots, the raw-trade authoritative path can also run without an opening-lot snapshot file
+- IBKR tax XML is still needed for dividends, withholding tax, and bonds, but not for stock sale calculation
+- if there were no pre-move open positions, the raw-trade authoritative path can also run without an opening-state file
 
 Current Eugene case:
 
@@ -47,10 +47,9 @@ Current Eugene case:
 
 Current IBKR artifacts produced by `main.py` include:
 
-- `trades_tax_df`
-- `trades_reconciliation`
-- `stock_tax_lot_state_full`
-- `stock_tax_open_lots_final`
+- `stock_tax_sales`
+- `stock_tax_position_events`
+- `stock_tax_position_state_full`
 - `dividends_country_agg`
 - `bonds_tax_df`
 - `bonds_tax_country_agg_df`
@@ -67,9 +66,9 @@ Typical copy-edit-run flow:
    - `person`
    - `ibkr_input_path`
      - can be one XML file, a wildcard, a directory, or a Python list of XML files
-     - must cover the full filing year for dividends, withholding tax, bonds, and broker reconciliation
+     - must cover the full filing year for dividends, withholding tax, and bonds
    - `ibkr_trade_history_path`
-   - `austrian_opening_lots_path`
+   - `austrian_opening_state_path`
    - `authoritative_start_date`
    - `reporting_start_date`
    - `reporting_end_date`
@@ -86,7 +85,7 @@ Sample Eugene 2025 stock-authoritative setup already present in `main.py`:
 person = "eugene"
 ibkr_input_path = "data/input/eugene/2025/ibkr_20250101_20260101.xml"
 ibkr_trade_history_path = "data/input/eugene/ibkr/trades/*.xml"
-austrian_opening_lots_path = "data/input/eugene/ibkr/austrian_opening_lots_2024-05-01.csv"
+austrian_opening_state_path = "data/input/eugene/ibkr/austrian_opening_state_2024-05-01.csv"
 authoritative_start_date = date(2024, 5, 1)
 
 reporting_start_date = date(2025, 1, 1)
@@ -97,13 +96,13 @@ If all buys are already post-move and no opening snapshot is needed, keep:
 
 ```python
 ibkr_trade_history_path = "data/input/<person>/ibkr/trades/*.xml"
-austrian_opening_lots_path = None
+austrian_opening_state_path = None
 authoritative_start_date = None
 ```
 
 Rule:
 
-- `authoritative_start_date` is only valid together with an Austrian opening-lot snapshot
+- `authoritative_start_date` is only valid together with an Austrian opening-state snapshot
 - without a snapshot, provide the full relevant raw trade history instead of a lower-bound cutoff
 
 ## Documentation

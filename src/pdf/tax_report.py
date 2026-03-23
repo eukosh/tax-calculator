@@ -16,7 +16,7 @@ FINANZONLINE_NOTES = [
     "The FinanzOnline helper and tax estimate are capital-income-only views. "
     "They do not include other tax-return items such as donations, so the overall FinanzOnline "
     "pre-calculation can differ.",
-    "Foreign tax withheld = sum of actual foreign tax withheld by brokers.",
+    "Foreign tax withheld (raw) = sum of actual foreign tax withheld by brokers before any treaty cap.",
     "Preliminary creditable foreign tax before loss offset = "
     "sum(min(withheld tax per payment, treaty cap per payment)). "
     "For the currently supported dividend/distribution rows, the treaty cap is generally 15% of gross income.",

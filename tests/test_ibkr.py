@@ -83,17 +83,17 @@ def bonds_tax_df():
             "issuer_country_code": ["US", "US", "US", "US", "US"],
             "currency": ["USD", "USD", "USD", "USD", "USD"],
             "proceeds": [4000.0, 4000.0, 5000.0, 3000.0, 3000.0],
-            "realized_pnl": [100.92, 90.33, 76.64, 70.85, 42.34],
+            "realized_pnl": [100.92, 95.33, 81.64, 75.85, 47.34],
             "realized_pnl_euro": [
                 96.0503,
-                82.7046,
-                72.8033,
-                65.9499,
-                39.1096,
+                87.2825,
+                77.5530,
+                70.6042,
+                43.7281,
             ],
-            "realized_pnl_euro_net": [69.6365, 59.9608, 52.7824, 47.8137, 28.3545],
-            "kest_gross": [26.4138, 22.7438, 20.0209, 18.1362, 10.7551],
-            "kest_net": [26.4138, 22.7438, 20.0209, 18.1362, 10.7551],
+            "realized_pnl_euro_net": [69.6365, 63.2798, 56.2259, 51.1880, 31.7029],
+            "kest_gross": [26.4138, 24.0027, 21.3271, 19.4162, 12.0252],
+            "kest_net": [26.4138, 24.0027, 21.3271, 19.4162, 12.0252],
         }
     )
 
@@ -104,11 +104,11 @@ def bonds_country_summary_df():
         {
             "issuer_country_code": ["US"],
             Column.currency: ["USD"],
-            Column.profit_total: [381.08],
-            Column.profit_euro_total: [356.6176],
-            Column.profit_euro_net_total: [258.5478],
-            Column.kest_gross_total: [98.0698],
-            Column.kest_net_total: [98.0698],
+            Column.profit_total: [401.08],
+            Column.profit_euro_total: [375.2181],
+            Column.profit_euro_net_total: [272.0331],
+            Column.kest_gross_total: [103.1850],
+            Column.kest_net_total: [103.1850],
         }
     )
 
@@ -262,16 +262,136 @@ def test_process_cash_transactions_ibkr(
     assert_frame_equal(res_df, expected)
 
 
-def test_process_bonds_ibkr(rates_df, bonds_tax_df, bonds_country_summary_df):
+def test_process_bonds_ibkr(tmp_path: Path, rates_df, bonds_tax_df, bonds_country_summary_df):
+    trade_history_path = tmp_path / "bill_history.xml"
+    _write_trade_history_xml(
+        trade_history_path,
+        [
+            _bill_trade_confirm_row(
+                ticker="912797GN1",
+                isin="US912797GN18",
+                trade_date="2024-02-15",
+                date_time="2024-02-15 10:00:00",
+                quantity="3000",
+                price="97.4716667",
+                amount="2924.15",
+                trade_id="buy-gn18",
+            ),
+            _bill_trade_confirm_row(
+                ticker="912797GP6",
+                isin="US912797GP65",
+                trade_date="2024-02-29",
+                date_time="2024-02-29 10:00:00",
+                quantity="3000",
+                price="98.422",
+                amount="2952.66",
+                trade_id="buy-gp65",
+            ),
+            _bill_trade_confirm_row(
+                ticker="912797GK7",
+                isin="US912797GK78",
+                trade_date="2024-08-07",
+                date_time="2024-08-07 10:00:00",
+                quantity="4000",
+                price="97.61675",
+                amount="3904.67",
+                trade_id="buy-gk78",
+            ),
+            _bill_trade_confirm_row(
+                ticker="912797MN4",
+                isin="US912797MN44",
+                trade_date="2024-12-10",
+                date_time="2024-12-10 10:00:00",
+                quantity="5000",
+                price="98.3672",
+                amount="4918.36",
+                trade_id="buy-mn44",
+            ),
+        ],
+    )
     tax_res_df, summary_res_df = process_bonds_ibkr(
         "tests/test_data/ibkr/For_tax_automation*",
         rates_df,
         start_date=REPORTING_START_DATE,
         end_date=REPORTING_END_DATE,
+        ibkr_trade_history_path=str(trade_history_path),
     )
 
     assert_frame_equal(tax_res_df, bonds_tax_df)
     assert_frame_equal(summary_res_df, bonds_country_summary_df)
+
+
+def test_process_bonds_ibkr_uses_buy_date_fx_and_ignores_buy_commission_for_bills(tmp_path: Path):
+    trade_history_path = tmp_path / "bill_history.xml"
+    _write_trade_history_xml(
+        trade_history_path,
+        [
+            _bill_trade_confirm_row(
+                ticker="912797MS3",
+                isin="US912797MS31",
+                trade_date="2024-12-13",
+                date_time="2024-12-13 10:18:04",
+                quantity="6000",
+                price="96.6666667",
+                amount="5800",
+                trade_id="buy-ms31",
+            )
+        ],
+    )
+    corporate_actions_path = tmp_path / "corporate_actions.xml"
+    corporate_actions_path.write_text(
+        "<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement><CorporateActions>\n"
+        "<CorporateAction accountId=\"-\" acctAlias=\"\" model=\"\" currency=\"USD\" assetCategory=\"BILL\" "
+        "subCategory=\"\" symbol=\"912797MS3\" securityID=\"US912797MS31\" securityIDType=\"ISIN\" "
+        "isin=\"US912797MS31\" issuerCountryCode=\"US\" reportDate=\"2025-10-02\" dateTime=\"2025-10-01 20:25:00\" "
+        "actionDescription=\"TBILL MATURITY\" proceeds=\"6000\" quantity=\"-6000\" fifoPnlRealized=\"195\" type=\"TM\" />\n"
+        "</CorporateActions></FlexStatement></FlexStatements></FlexQueryResponse>\n",
+        encoding="utf-8",
+    )
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 12, 13), date(2025, 10, 2)],
+            Column.currency: ["USD", "USD"],
+            Column.exchange_rate: [1.0, 2.0],
+        }
+    )
+
+    tax_df, summary_df = process_bonds_ibkr(
+        str(corporate_actions_path),
+        rates_df,
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 12, 31),
+        ibkr_trade_history_path=str(trade_history_path),
+    )
+
+    expected_tax_df = pl.DataFrame(
+        {
+            "report_date": [date(2025, 10, 2)],
+            "isin": ["US912797MS31"],
+            "issuer_country_code": ["US"],
+            "currency": ["USD"],
+            "proceeds": [6000.0],
+            "realized_pnl": [200.0],
+            "realized_pnl_euro": [-2800.0],
+            "realized_pnl_euro_net": [-2800.0],
+            "kest_gross": [0.0],
+            "kest_net": [0.0],
+        }
+    )
+    expected_summary_df = pl.DataFrame(
+        {
+            "issuer_country_code": ["US"],
+            Column.currency: ["USD"],
+            Column.profit_total: [200.0],
+            Column.profit_euro_total: [-2800.0],
+            Column.profit_euro_net_total: [-2800.0],
+            Column.kest_gross_total: [0.0],
+            Column.kest_net_total: [0.0],
+        }
+    )
+
+    assert_frame_equal(tax_df, expected_tax_df)
+    assert_frame_equal(summary_df, expected_summary_df)
 
 
 def test_calculate_summary_ibkr(dividends_country_summary_df, bonds_country_summary_df):
@@ -286,12 +406,12 @@ def test_calculate_summary_ibkr(dividends_country_summary_df, bonds_country_summ
         {
             Column.type: ["dividends", "dividends", "bonds"],
             Column.currency: ["USD", "EUR", "USD"],
-            Column.profit_total: [69.52, 7.6, 381.08],
-            Column.profit_euro_total: [65.4115, 7.6, 356.6176],
-            Column.profit_euro_net_total: [47.4183, 5.51, 258.5478],
+            Column.profit_total: [69.52, 7.6, 401.08],
+            Column.profit_euro_total: [65.4115, 7.6, 375.2181],
+            Column.profit_euro_net_total: [47.4183, 5.51, 272.0331],
             Column.withholding_tax_euro_total: [3.3471, 1.14, 0],
-            Column.kest_gross_total: [17.9881, 2.09, 98.0698],
-            Column.kest_net_total: [14.646, 0.95, 98.0698],
+            Column.kest_gross_total: [17.9881, 2.09, 103.185],
+            Column.kest_net_total: [14.646, 0.95, 103.185],
         }
     ).sort("profit_total")
 
@@ -313,12 +433,12 @@ def test_calculate_summary_separate_etfs_ibkr(
         {
             Column.type: ["dividends", "dividends", "bonds", "ETF div"],
             Column.currency: ["EUR", "USD", "USD", "USD"],
-            Column.profit_total: [7.6, 27.99, 381.08, 41.53],
-            Column.profit_euro_total: [7.6, 25.6127, 356.6176, 39.7987],
-            Column.profit_euro_net_total: [5.51, 18.5642, 258.5478, 28.8541],
+            Column.profit_total: [7.6, 27.99, 401.08, 41.53],
+            Column.profit_euro_total: [7.6, 25.6127, 375.2181, 39.7987],
+            Column.profit_euro_net_total: [5.51, 18.5642, 272.0331, 28.8541],
             Column.withholding_tax_euro_total: [1.14, 3.3471, 0, 0.0],
-            Column.kest_gross_total: [2.09, 7.0435, 98.0698, 10.9446],
-            Column.kest_net_total: [0.95, 3.7014, 98.0698, 10.9446],
+            Column.kest_gross_total: [2.09, 7.0435, 103.185, 10.9446],
+            Column.kest_net_total: [0.95, 3.7014, 103.185, 10.9446],
         }
     ).sort(Column.currency)
 
@@ -381,8 +501,7 @@ def test_process_trades_ibkr_uses_buy_and_sell_rates(tmp_path):
         }
     )
 
-    detail_df, summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    detail_df, summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2024, 1, 1),
         end_date=date(2024, 12, 31),
@@ -392,34 +511,26 @@ def test_process_trades_ibkr_uses_buy_and_sell_rates(tmp_path):
     expected_detail_df = pl.DataFrame(
         {
             "sale_date": ["2024-06-03"],
-            "sale_datetime": ["2024-06-03 10:00:00"],
-            "sale_trade_id": ["sell-1"],
             "ticker": ["AAPL"],
             "isin": ["US0378331005"],
             "quantity_sold": [1.0],
             "sale_price_ccy": [120.0],
             "sale_fx": [1.2],
-            "lot_id": ["AAPL:2024-01-02:buy-1"],
-            "lot_buy_date": ["2024-01-02"],
-            "lot_buy_datetime": ["2024-01-02 10:00:00"],
-            "lot_source_trade_id": ["buy-1"],
-            "quantity_from_lot": [1.0],
             "taxable_proceeds_eur": [100.0],
+            "realized_base_cost_eur": [100.0],
             "taxable_original_basis_eur": [100.0],
+            "realized_oekb_adjustment_eur": [0.0],
+            "taxable_stepup_basis_eur": [0.0],
             "taxable_total_basis_eur": [100.0],
             "taxable_gain_loss_eur": [0.0],
-            "allocated_buy_fee_eur": [0.0],
-            "allocated_sale_fee_eur": [0.0],
-            "basis_origin": ["post_move_buy"],
-            "notes": [
-                "Austrian-authoritative FIFO sale result uses raw post-move buy lots and matches broker closed-lot output after fee adjustment."
-            ],
+            "notes": ["Austrian moving-average sale result from raw IBKR trade history."],
+            "sale_trade_id": ["sell-1"],
         }
     )
     assert_frame_equal(detail_df, expected_detail_df)
     assert summary_df is None
-    assert stock_lot_state_df is not None
-    assert trades_reconciliation_df is not None
+    assert stock_position_state_df is not None
+    assert stock_position_events_df is not None
 
 
 def test_process_trades_ibkr_clips_taxable_profit_on_loss(tmp_path):
@@ -478,8 +589,7 @@ def test_process_trades_ibkr_clips_taxable_profit_on_loss(tmp_path):
         }
     )
 
-    detail_df, summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    detail_df, summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2024, 1, 1),
         end_date=date(2024, 12, 31),
@@ -489,28 +599,20 @@ def test_process_trades_ibkr_clips_taxable_profit_on_loss(tmp_path):
     expected_detail_df = pl.DataFrame(
         {
             "sale_date": ["2024-06-03"],
-            "sale_datetime": ["2024-06-03 10:00:00"],
-            "sale_trade_id": ["sell-1"],
             "ticker": ["AAPL"],
             "isin": ["US0378331005"],
             "quantity_sold": [1.0],
             "sale_price_ccy": [80.0],
             "sale_fx": [1.0],
-            "lot_id": ["AAPL:2024-01-02:buy-1"],
-            "lot_buy_date": ["2024-01-02"],
-            "lot_buy_datetime": ["2024-01-02 10:00:00"],
-            "lot_source_trade_id": ["buy-1"],
-            "quantity_from_lot": [1.0],
             "taxable_proceeds_eur": [80.0],
+            "realized_base_cost_eur": [100.0],
             "taxable_original_basis_eur": [100.0],
+            "realized_oekb_adjustment_eur": [0.0],
+            "taxable_stepup_basis_eur": [0.0],
             "taxable_total_basis_eur": [100.0],
             "taxable_gain_loss_eur": [-20.0],
-            "allocated_buy_fee_eur": [0.0],
-            "allocated_sale_fee_eur": [0.0],
-            "basis_origin": ["post_move_buy"],
-            "notes": [
-                "Austrian-authoritative FIFO sale result uses raw post-move buy lots and matches broker closed-lot output after fee adjustment."
-            ],
+            "notes": ["Austrian moving-average sale result from raw IBKR trade history."],
+            "sale_trade_id": ["sell-1"],
         }
     )
     expected_summary_df = pl.DataFrame(
@@ -528,8 +630,8 @@ def test_process_trades_ibkr_clips_taxable_profit_on_loss(tmp_path):
 
     assert_frame_equal(detail_df, expected_detail_df)
     assert_frame_equal(summary_df, expected_summary_df)
-    assert stock_lot_state_df is not None
-    assert trades_reconciliation_df is not None
+    assert stock_position_state_df is not None
+    assert stock_position_events_df is not None
 
 
 def test_process_trades_ibkr_raises_without_buy_side_rate(tmp_path):
@@ -590,7 +692,6 @@ def test_process_trades_ibkr_raises_without_buy_side_rate(tmp_path):
 
     with pytest.raises(ValueError, match="No FX rate available for USD on or before 2023-01-02"):
         process_trades_ibkr(
-            xml_file_path=str(closed_lot_path),
             exchange_rates_df=rates_df,
             start_date=date(2024, 1, 1),
             end_date=date(2024, 12, 31),
@@ -688,8 +789,7 @@ def test_process_trades_ibkr_separates_realized_profit_and_loss_by_default(tmp_p
         }
     )
 
-    _, summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    _, summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2024, 1, 1),
         end_date=date(2024, 12, 31),
@@ -710,8 +810,8 @@ def test_process_trades_ibkr_separates_realized_profit_and_loss_by_default(tmp_p
     ).sort(Column.type)
 
     assert_frame_equal(summary_df.sort(Column.type), expected_summary_df)
-    assert stock_lot_state_df is not None
-    assert trades_reconciliation_df is not None
+    assert stock_position_state_df is not None
+    assert stock_position_events_df is not None
 
 
 def test_process_trades_ibkr_can_disable_separate_profit_loss_reporting(tmp_path):
@@ -804,8 +904,7 @@ def test_process_trades_ibkr_can_disable_separate_profit_loss_reporting(tmp_path
         }
     )
 
-    _, summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    _, summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2024, 1, 1),
         end_date=date(2024, 12, 31),
@@ -826,8 +925,8 @@ def test_process_trades_ibkr_can_disable_separate_profit_loss_reporting(tmp_path
     )
 
     assert_frame_equal(summary_df, expected_summary_df)
-    assert stock_lot_state_df is not None
-    assert trades_reconciliation_df is not None
+    assert stock_position_state_df is not None
+    assert stock_position_events_df is not None
 
 
 def test_process_trades_ibkr_requires_raw_trade_history_path(tmp_path: Path):
@@ -859,7 +958,6 @@ def test_process_trades_ibkr_requires_raw_trade_history_path(tmp_path: Path):
 
     with pytest.raises(ValueError, match="requires ibkr_trade_history_path"):
         process_trades_ibkr(
-            xml_file_path=str(closed_lot_path),
             exchange_rates_df=rates_df,
             start_date=date(2024, 1, 1),
             end_date=date(2024, 12, 31),
@@ -955,8 +1053,7 @@ def test_core_ibkr_excludes_etfs_from_trades_cash_and_finanzonline_buckets(tmp_p
         }
     )
 
-    detail_df, summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(xml_path),
+    detail_df, summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2024, 1, 1),
         end_date=date(2024, 12, 31),
@@ -980,15 +1077,15 @@ def test_core_ibkr_excludes_etfs_from_trades_cash_and_finanzonline_buckets(tmp_p
 
     assert detail_df is not None
     assert detail_df["ticker"].to_list() == ["AAPL"]
-    assert detail_df["basis_origin"].to_list() == ["post_move_buy"]
+    assert detail_df["taxable_total_basis_eur"].to_list() == [200.0]
     assert summary_df is not None
     assert summary_df["profit_euro_total"].to_list() == [30.0]
     assert dividends_df is None
     assert etf_dividends_df is None
     assert dividend_buckets_df.is_empty()
-    assert stock_lot_state_df is not None
-    assert stock_lot_state_df["ticker"].to_list() == ["AAPL"]
-    assert trades_reconciliation_df is not None
+    assert stock_position_state_df is not None
+    assert stock_position_state_df["ticker"].to_list() == ["AAPL"]
+    assert stock_position_events_df is not None
 
 
 def test_process_cash_transactions_ibkr_dedupes_overlapping_xml_inputs(tmp_path):
@@ -1121,8 +1218,7 @@ def test_process_trades_ibkr_dedupes_overlapping_closed_lot_xml_inputs(tmp_path)
         }
     )
 
-    detail_df, _, _, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=[str(first_closed_lot_path), str(second_closed_lot_path)],
+    detail_df, _, _, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2024, 1, 1),
         end_date=date(2024, 12, 31),
@@ -1131,54 +1227,42 @@ def test_process_trades_ibkr_dedupes_overlapping_closed_lot_xml_inputs(tmp_path)
 
     assert detail_df is not None
     assert detail_df.height == 1
-    assert trades_reconciliation_df is not None
-    assert trades_reconciliation_df.height == 1
-    assert trades_reconciliation_df["sale_aggregate_status"].to_list() == ["matched"]
+    assert stock_position_events_df is not None
+    assert stock_position_events_df.filter(pl.col("event_type") == "buy").height == 1
+    assert stock_position_events_df.filter(pl.col("event_type") == "sell").height == 1
 
 
 def _write_opening_lots_csv(path: Path, rows: list[dict[str, object]]) -> None:
     header = (
-        "snapshot_date,asset_class,ticker,isin,lot_id,buy_date,original_quantity,remaining_quantity,"
-        "currency,buy_price_ccy,buy_fx_to_eur,original_cost_eur,cumulative_oekb_stepup_eur,adjusted_basis_eur,"
-        "status,broker,account_id,notes,last_adjustment_year,last_adjustment_reference,last_sale_date,"
-        "sold_quantity_ytd,source_trade_id,source_statement_file,broker_buy_date,broker_buy_price_ccy,"
-        "broker_buy_fx_to_eur,broker_original_cost_eur,austrian_basis_method,austrian_basis_price_ccy,"
-        "austrian_basis_fx_to_eur\n"
+        "snapshot_date,broker,ticker,isin,currency,asset_class,quantity,base_cost_total_eur,"
+        "basis_adjustment_total_eur,total_basis_eur,average_basis_eur,status,last_event_date,basis_method,"
+        "notes,source_file\n"
     )
     body = "".join(
         ",".join(
             [
                 str(row["snapshot_date"]),
-                str(row["asset_class"]),
+                str(row.get("broker", "ibkr")),
                 str(row["ticker"]),
                 str(row["isin"]),
-                str(row["lot_id"]),
-                str(row["buy_date"]),
-                str(row["original_quantity"]),
-                str(row["remaining_quantity"]),
                 str(row["currency"]),
-                str(row["buy_price_ccy"]),
-                str(row["buy_fx_to_eur"]),
-                str(row["original_cost_eur"]),
-                str(row.get("cumulative_oekb_stepup_eur", 0.0)),
-                str(row["adjusted_basis_eur"]),
+                str(row["asset_class"]),
+                str(row.get("quantity", row.get("remaining_quantity", row.get("original_quantity", 0.0)))),
+                str(row.get("base_cost_total_eur", row.get("original_cost_eur", 0.0))),
+                str(row.get("basis_adjustment_total_eur", row.get("cumulative_oekb_stepup_eur", 0.0))),
+                str(
+                    row.get(
+                        "total_basis_eur",
+                        (row.get("base_cost_total_eur", row.get("original_cost_eur", 0.0)))
+                        + row.get("basis_adjustment_total_eur", row.get("cumulative_oekb_stepup_eur", 0.0)),
+                    )
+                ),
+                str(row.get("average_basis_eur", 0.0)),
                 str(row.get("status", "open")),
-                str(row.get("broker", "ibkr")),
-                str(row.get("account_id", "U1")),
+                str(row.get("last_event_date", row["snapshot_date"])),
+                str(row.get("basis_method", row.get("austrian_basis_method", "move_in_fmv_reset"))),
                 str(row.get("notes", "")),
-                str(row.get("last_adjustment_year", "")),
-                str(row.get("last_adjustment_reference", "")),
-                str(row.get("last_sale_date", "")),
-                str(row.get("sold_quantity_ytd", 0.0)),
-                str(row.get("source_trade_id", "")),
-                str(row.get("source_statement_file", "seed.csv")),
-                str(row.get("broker_buy_date", "")),
-                str(row.get("broker_buy_price_ccy", "")),
-                str(row.get("broker_buy_fx_to_eur", "")),
-                str(row.get("broker_original_cost_eur", "")),
-                str(row.get("austrian_basis_method", "move_in_fmv_reset")),
-                str(row.get("austrian_basis_price_ccy", "")),
-                str(row.get("austrian_basis_fx_to_eur", "")),
+                str(row.get("source_file", row.get("source_statement_file", "seed.csv"))),
             ]
         )
         + "\n"
@@ -1217,15 +1301,40 @@ def _trade_confirm_row(
     price: str,
     trade_id: str,
     currency: str = "USD",
+    account_id: str = "U1",
     extra_attrs: dict[str, str] | None = None,
 ) -> str:
     extra = ""
     if extra_attrs:
         extra = " " + " ".join(f'{key}="{value}"' for key, value in extra_attrs.items())
     return (
-        f"<TradeConfirm accountId=\"U1\" symbol=\"{ticker}\" isin=\"{isin}\" subCategory=\"{sub_category}\" "
+        f"<TradeConfirm accountId=\"{account_id}\" symbol=\"{ticker}\" isin=\"{isin}\" subCategory=\"{sub_category}\" "
         f"assetCategory=\"STK\" currency=\"{currency}\" tradeDate=\"{trade_date}\" dateTime=\"{date_time}\" "
         f"buySell=\"{operation}\" quantity=\"{quantity}\" tradePrice=\"{price}\" transactionID=\"{trade_id}\"{extra} />"
+    )
+
+
+def _bill_trade_confirm_row(
+    *,
+    ticker: str,
+    isin: str,
+    trade_date: str,
+    date_time: str,
+    quantity: str,
+    price: str,
+    amount: str,
+    trade_id: str,
+    currency: str = "USD",
+    commission: str = "-5",
+    accrued_int: str = "0",
+    account_id: str = "U1",
+) -> str:
+    return (
+        f"<TradeConfirm accountId=\"{account_id}\" symbol=\"{ticker}\" isin=\"{isin}\" subCategory=\"\" "
+        f"assetCategory=\"BILL\" currency=\"{currency}\" tradeDate=\"{trade_date}\" dateTime=\"{date_time}\" "
+        f"buySell=\"BUY\" quantity=\"{quantity}\" tradePrice=\"{price}\" amount=\"{amount}\" proceeds=\"-{amount}\" "
+        f"commission=\"{commission}\" commissionCurrency=\"{currency}\" accruedInt=\"{accrued_int}\" "
+        f"transactionID=\"{trade_id}\" />"
     )
 
 
@@ -1259,7 +1368,7 @@ def _closed_lot_row(
         ("REIT", "O", "US7561091049"),
     ],
 )
-def test_process_trades_ibkr_authoritative_uses_snapshot_basis_for_snapshot_covered_stock_like_lot(
+def test_process_trades_ibkr_authoritative_uses_snapshot_state_for_moving_average_basis(
     tmp_path: Path,
     sub_category: str,
     ticker: str,
@@ -1283,10 +1392,6 @@ def test_process_trades_ibkr_authoritative_uses_snapshot_basis_for_snapshot_cove
                 "buy_fx_to_eur": 1.0,
                 "original_cost_eur": 200.0,
                 "adjusted_basis_eur": 200.0,
-                "broker_buy_date": "2023-04-25",
-                "broker_buy_price_ccy": 80.0,
-                "broker_buy_fx_to_eur": 1.0,
-                "broker_original_cost_eur": 160.0,
             }
         ],
     )
@@ -1308,23 +1413,7 @@ def test_process_trades_ibkr_authoritative_uses_snapshot_basis_for_snapshot_cove
         ],
     )
     closed_lot_path = tmp_path / "closed.xml"
-    _write_closed_lot_xml(
-        closed_lot_path,
-        [
-            _closed_lot_row(
-                ticker=ticker,
-                isin=isin,
-                sub_category=sub_category,
-                sale_date="2025-06-03",
-                sale_datetime="2025-06-03 10:00:00",
-                buy_datetime="2023-04-25 09:31:38",
-                quantity="2",
-                cost="160",
-                pnl="80",
-                sale_trade_id="sell-1",
-            )
-        ],
-    )
+    _write_closed_lot_xml(closed_lot_path, [])
     rates_df = pl.DataFrame(
         {
             Column.rate_date: [date(2024, 5, 1), date(2025, 6, 3)],
@@ -1333,30 +1422,25 @@ def test_process_trades_ibkr_authoritative_uses_snapshot_basis_for_snapshot_cove
         }
     )
 
-    detail_df, summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    detail_df, summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2025, 1, 1),
         end_date=date(2025, 12, 31),
-        austrian_opening_lots_path=str(opening_path),
+        austrian_opening_state_path=str(opening_path),
         ibkr_trade_history_path=str(trade_history_path),
     )
 
     assert detail_df is not None
     assert summary_df is not None
-    assert detail_df["basis_origin"].to_list() == ["snapshot"]
-    assert detail_df["taxable_original_basis_eur"].to_list() == [200.0]
+    assert detail_df["taxable_total_basis_eur"].to_list() == [200.0]
     assert detail_df["taxable_gain_loss_eur"].to_list() == [40.0]
-    assert "taxable_stepup_basis_eur" not in detail_df.columns
-    assert stock_lot_state_df is not None
-    assert trades_reconciliation_df is not None
-    assert trades_reconciliation_df["reconciliation_status"].to_list() == ["informational"]
-    assert stock_lot_state_df["lot_id"].to_list() == [f"{ticker}:snapshot"]
-    assert stock_lot_state_df["status"].to_list() == ["closed"]
-    assert stock_lot_state_df["remaining_quantity"].to_list() == [0.0]
+    assert stock_position_state_df is not None
+    assert stock_position_state_df["quantity"].to_list() == [0.0]
+    assert stock_position_events_df is not None
+    assert stock_position_events_df.filter(pl.col("event_type") == "sell").height == 1
 
 
-def test_process_trades_ibkr_authoritative_returns_partial_and_open_stock_lot_state(tmp_path: Path):
+def test_process_trades_ibkr_authoritative_keeps_moving_average_after_partial_sale(tmp_path: Path):
     opening_path = tmp_path / "opening.csv"
     _write_opening_lots_csv(
         opening_path,
@@ -1407,23 +1491,7 @@ def test_process_trades_ibkr_authoritative_returns_partial_and_open_stock_lot_st
         ],
     )
     closed_lot_path = tmp_path / "closed.xml"
-    _write_closed_lot_xml(
-        closed_lot_path,
-        [
-            _closed_lot_row(
-                ticker="AAPL",
-                isin="US0378331005",
-                sub_category="COMMON",
-                sale_date="2025-06-03",
-                sale_datetime="2025-06-03 10:00:00",
-                buy_datetime="2023-04-25 09:31:38",
-                quantity="2",
-                cost="160",
-                pnl="100",
-                sale_trade_id="sell-1",
-            )
-        ],
-    )
+    _write_closed_lot_xml(closed_lot_path, [])
     rates_df = pl.DataFrame(
         {
             Column.rate_date: [date(2024, 5, 1), date(2025, 2, 1), date(2025, 6, 3)],
@@ -1432,228 +1500,29 @@ def test_process_trades_ibkr_authoritative_returns_partial_and_open_stock_lot_st
         }
     )
 
-    _, _, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    detail_df, _, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2025, 1, 1),
         end_date=date(2025, 12, 31),
-        austrian_opening_lots_path=str(opening_path),
-        ibkr_trade_history_path=str(trade_history_path),
-    )
-
-    assert stock_lot_state_df is not None
-    assert trades_reconciliation_df is not None
-    snapshot_row = stock_lot_state_df.filter(pl.col("lot_id") == "AAPL:snapshot")
-    assert snapshot_row["status"].to_list() == ["partially_sold"]
-    assert snapshot_row["remaining_quantity"].to_list() == [1.0]
-    assert snapshot_row["original_cost_eur"].to_list() == [100.0]
-    assert snapshot_row["initial_original_cost_eur"].to_list() == [300.0]
-
-    post_move_row = stock_lot_state_df.filter(pl.col("basis_origin") == "post_move_buy")
-    assert post_move_row["status"].to_list() == ["open"]
-    assert post_move_row["remaining_quantity"].to_list() == [1.0]
-    assert post_move_row["initial_original_cost_eur"].to_list() == [110.0]
-
-
-def test_process_trades_ibkr_authoritative_matches_post_move_non_snapshot_stock_like_closed_lot(tmp_path: Path):
-    opening_path = tmp_path / "opening.csv"
-    _write_opening_lots_csv(
-        opening_path,
-        [
-            {
-                "snapshot_date": "2024-05-01",
-                "asset_class": "COMMON",
-                "ticker": "AAPL",
-                "isin": "US0378331005",
-                "lot_id": "AAPL:snapshot",
-                "buy_date": "2024-05-01",
-                "original_quantity": 1.0,
-                "remaining_quantity": 1.0,
-                "currency": "USD",
-                "buy_price_ccy": 100.0,
-                "buy_fx_to_eur": 1.0,
-                "original_cost_eur": 100.0,
-                "adjusted_basis_eur": 100.0,
-            }
-        ],
-    )
-    trade_history_path = tmp_path / "history.xml"
-    _write_trade_history_xml(
-        trade_history_path,
-        [
-            _trade_confirm_row(
-                ticker="CRM",
-                isin="US79466L3024",
-                sub_category="COMMON",
-                trade_date="2025-01-02",
-                date_time="2025-01-02 10:00:00",
-                operation="BUY",
-                quantity="2",
-                price="100",
-                trade_id="buy-1",
-            ),
-            _trade_confirm_row(
-                ticker="CRM",
-                isin="US79466L3024",
-                sub_category="COMMON",
-                trade_date="2025-03-01",
-                date_time="2025-03-01 11:00:00",
-                operation="SELL",
-                quantity="-2",
-                price="130",
-                trade_id="sell-1",
-            ),
-        ],
-    )
-    closed_lot_path = tmp_path / "closed.xml"
-    _write_closed_lot_xml(
-        closed_lot_path,
-        [
-            _closed_lot_row(
-                ticker="CRM",
-                isin="US79466L3024",
-                sub_category="COMMON",
-                sale_date="2025-03-01",
-                sale_datetime="2025-03-01 11:00:00",
-                buy_datetime="2025-01-02 10:00:00",
-                quantity="2",
-                cost="200",
-                pnl="60",
-                sale_trade_id="broker-sell-1",
-            )
-        ],
-    )
-    rates_df = pl.DataFrame(
-        {
-            Column.rate_date: [date(2024, 5, 1), date(2025, 1, 2), date(2025, 3, 1)],
-            Column.currency: ["USD", "USD", "USD"],
-            Column.exchange_rate: [1.0, 1.0, 1.0],
-        }
-    )
-
-    detail_df, _, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
-        exchange_rates_df=rates_df,
-        start_date=date(2025, 1, 1),
-        end_date=date(2025, 12, 31),
-        austrian_opening_lots_path=str(opening_path),
+        austrian_opening_state_path=str(opening_path),
         ibkr_trade_history_path=str(trade_history_path),
     )
 
     assert detail_df is not None
-    assert detail_df["basis_origin"].to_list() == ["post_move_buy"]
-    assert trades_reconciliation_df is not None
-    assert trades_reconciliation_df["reconciliation_status"].to_list() == ["matched"]
-    assert trades_reconciliation_df["sale_aggregate_status"].to_list() == ["matched"]
-    assert stock_lot_state_df is not None
+    assert stock_position_state_df is not None
+    assert stock_position_state_df["quantity"].to_list() == [2.0]
+    assert stock_position_state_df["average_basis_eur"].to_list() == [102.5]
+    assert detail_df["taxable_total_basis_eur"].to_list() == [205.0]
+    assert detail_df["taxable_gain_loss_eur"].to_list() == [55.0]
+    assert stock_position_events_df is not None
+    assert "eligibility_date" not in stock_position_events_df.columns
+    assert "basis_adjustment_delta_eur" not in stock_position_events_df.columns
+    assert "realized_oekb_adjustment_eur" not in stock_position_events_df.columns
+    assert "basis_adjustment_total_eur_after" not in stock_position_events_df.columns
+    assert stock_position_events_df.filter(pl.col("event_type") == "sell")["average_basis_eur_after"].to_list() == [102.5]
 
 
-def test_process_trades_ibkr_authoritative_mixed_sale_uses_segmented_reconciliation(tmp_path: Path):
-    opening_path = tmp_path / "opening.csv"
-    _write_opening_lots_csv(
-        opening_path,
-        [
-            {
-                "snapshot_date": "2024-05-01",
-                "asset_class": "COMMON",
-                "ticker": "AAPL",
-                "isin": "US0378331005",
-                "lot_id": "AAPL:snapshot",
-                "buy_date": "2024-05-01",
-                "original_quantity": 2.0,
-                "remaining_quantity": 2.0,
-                "currency": "USD",
-                "buy_price_ccy": 100.0,
-                "buy_fx_to_eur": 1.0,
-                "original_cost_eur": 200.0,
-                "adjusted_basis_eur": 200.0,
-            }
-        ],
-    )
-    trade_history_path = tmp_path / "history.xml"
-    _write_trade_history_xml(
-        trade_history_path,
-        [
-            _trade_confirm_row(
-                ticker="AAPL",
-                isin="US0378331005",
-                sub_category="COMMON",
-                trade_date="2025-02-01",
-                date_time="2025-02-01 12:00:00",
-                operation="BUY",
-                quantity="1",
-                price="110",
-                trade_id="buy-1",
-            ),
-            _trade_confirm_row(
-                ticker="AAPL",
-                isin="US0378331005",
-                sub_category="COMMON",
-                trade_date="2025-06-03",
-                date_time="2025-06-03 10:00:00",
-                operation="SELL",
-                quantity="-3",
-                price="130",
-                trade_id="sell-1",
-            ),
-        ],
-    )
-    closed_lot_path = tmp_path / "closed.xml"
-    _write_closed_lot_xml(
-        closed_lot_path,
-        [
-            _closed_lot_row(
-                ticker="AAPL",
-                isin="US0378331005",
-                sub_category="COMMON",
-                sale_date="2025-06-03",
-                sale_datetime="2025-06-03 10:00:00",
-                buy_datetime="2023-04-25 09:31:38",
-                quantity="2",
-                cost="160",
-                pnl="100",
-                sale_trade_id="sell-1",
-            ),
-            _closed_lot_row(
-                ticker="AAPL",
-                isin="US0378331005",
-                sub_category="COMMON",
-                sale_date="2025-06-03",
-                sale_datetime="2025-06-03 10:00:00",
-                buy_datetime="2025-02-01 12:00:00",
-                quantity="1",
-                cost="110",
-                pnl="20",
-                sale_trade_id="sell-1",
-            ),
-        ],
-    )
-    rates_df = pl.DataFrame(
-        {
-            Column.rate_date: [date(2024, 5, 1), date(2025, 2, 1), date(2025, 6, 3)],
-            Column.currency: ["USD", "USD", "USD"],
-            Column.exchange_rate: [1.0, 1.0, 1.0],
-        }
-    )
-
-    detail_df, _, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
-        exchange_rates_df=rates_df,
-        start_date=date(2025, 1, 1),
-        end_date=date(2025, 12, 31),
-        austrian_opening_lots_path=str(opening_path),
-        ibkr_trade_history_path=str(trade_history_path),
-    )
-
-    assert detail_df is not None
-    assert set(detail_df["basis_origin"].to_list()) == {"snapshot", "post_move_buy"}
-    assert trades_reconciliation_df is not None
-    assert set(trades_reconciliation_df["reconciliation_status"].to_list()) == {"informational", "matched"}
-    assert trades_reconciliation_df["sale_aggregate_status"].unique().to_list() == ["matched"]
-    assert stock_lot_state_df is not None
-
-
-def test_process_trades_ibkr_authoritative_fails_when_post_move_exact_segment_mismatches(tmp_path: Path):
+def test_process_trades_ibkr_authoritative_ignores_closed_lot_xml_and_uses_raw_trade_history(tmp_path: Path):
     opening_path = tmp_path / "opening.csv"
     _write_opening_lots_csv(
         opening_path,
@@ -1717,95 +1586,6 @@ def test_process_trades_ibkr_authoritative_fails_when_post_move_exact_segment_mi
                 quantity="2",
                 cost="210",
                 pnl="50",
-                sale_trade_id="sell-1",
-            )
-        ],
-    )
-    rates_df = pl.DataFrame(
-        {
-            Column.rate_date: [date(2024, 5, 1), date(2025, 1, 2), date(2025, 3, 1)],
-            Column.currency: ["USD", "USD", "USD"],
-            Column.exchange_rate: [1.0, 1.0, 1.0],
-        }
-    )
-
-    with pytest.raises(ValueError, match="Post-move basis mismatch"):
-        process_trades_ibkr(
-            xml_file_path=str(closed_lot_path),
-            exchange_rates_df=rates_df,
-            start_date=date(2025, 1, 1),
-            end_date=date(2025, 12, 31),
-            austrian_opening_lots_path=str(opening_path),
-            ibkr_trade_history_path=str(trade_history_path),
-        )
-
-
-def test_process_trades_ibkr_authoritative_uses_gross_tax_math_and_fee_adjusted_reconciliation(tmp_path: Path):
-    opening_path = tmp_path / "opening.csv"
-    _write_opening_lots_csv(
-        opening_path,
-        [
-            {
-                "snapshot_date": "2024-05-01",
-                "asset_class": "COMMON",
-                "ticker": "AAPL",
-                "isin": "US0378331005",
-                "lot_id": "AAPL:snapshot",
-                "buy_date": "2024-05-01",
-                "original_quantity": 1.0,
-                "remaining_quantity": 1.0,
-                "currency": "USD",
-                "buy_price_ccy": 100.0,
-                "buy_fx_to_eur": 1.0,
-                "original_cost_eur": 100.0,
-                "adjusted_basis_eur": 100.0,
-            }
-        ],
-    )
-    trade_history_path = tmp_path / "history.xml"
-    _write_trade_history_xml(
-        trade_history_path,
-        [
-            _trade_confirm_row(
-                ticker="CRM",
-                isin="US79466L3024",
-                sub_category="COMMON",
-                trade_date="2025-01-02",
-                date_time="2025-01-02 10:00:00",
-                operation="BUY",
-                quantity="2",
-                price="100",
-                trade_id="buy-1",
-                extra_attrs={"netCash": "-200.5"},
-            ),
-            _trade_confirm_row(
-                ticker="CRM",
-                isin="US79466L3024",
-                sub_category="COMMON",
-                trade_date="2025-03-01",
-                date_time="2025-03-01 11:00:00",
-                operation="SELL",
-                quantity="-2",
-                price="130",
-                trade_id="sell-1",
-                extra_attrs={"netCash": "259.5"},
-            ),
-        ],
-    )
-    closed_lot_path = tmp_path / "closed.xml"
-    _write_closed_lot_xml(
-        closed_lot_path,
-        [
-            _closed_lot_row(
-                ticker="CRM",
-                isin="US79466L3024",
-                sub_category="COMMON",
-                sale_date="2025-03-01",
-                sale_datetime="2025-03-01 11:00:00",
-                buy_datetime="2025-01-02 10:00:00",
-                quantity="2",
-                cost="200.5",
-                pnl="59.0",
                 sale_trade_id="broker-sell-1",
             )
         ],
@@ -1818,29 +1598,89 @@ def test_process_trades_ibkr_authoritative_uses_gross_tax_math_and_fee_adjusted_
         }
     )
 
-    detail_df, _, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    detail_df, _, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2025, 1, 1),
         end_date=date(2025, 12, 31),
-        austrian_opening_lots_path=str(opening_path),
+        austrian_opening_state_path=str(opening_path),
         ibkr_trade_history_path=str(trade_history_path),
     )
 
     assert detail_df is not None
     assert detail_df["taxable_original_basis_eur"].to_list() == [200.0]
-    assert detail_df["taxable_proceeds_eur"].to_list() == [260.0]
     assert detail_df["taxable_gain_loss_eur"].to_list() == [60.0]
-    assert detail_df["allocated_buy_fee_eur"].to_list() == [0.5]
-    assert detail_df["allocated_sale_fee_eur"].to_list() == [0.5]
-    assert stock_lot_state_df is not None
-    assert trades_reconciliation_df is not None
-    assert trades_reconciliation_df["reconciliation_status"].to_list() == ["matched"]
+    assert stock_position_state_df is not None
+    assert stock_position_state_df.filter(pl.col("ticker") == "CRM")["quantity"].to_list() == [0.0]
+    assert stock_position_events_df is not None
+    assert stock_position_events_df.filter(pl.col("event_type") == "sell")["source_id"].to_list() == ["sell-1"]
 
 
-def test_process_trades_ibkr_without_snapshot_replays_prior_raw_buys_and_ignores_fees_in_tax_math(
-    tmp_path: Path,
-):
+def test_process_trades_ibkr_authoritative_merges_opening_state_across_ibkr_account_migration(tmp_path: Path):
+    opening_path = tmp_path / "opening.csv"
+    _write_opening_lots_csv(
+        opening_path,
+        [
+            {
+                "snapshot_date": "2024-05-01",
+                "broker": "ibkr",
+                "asset_class": "COMMON",
+                "ticker": "T",
+                "isin": "US00206R1023",
+                "currency": "USD",
+                "quantity": 2.0,
+                "base_cost_total_eur": 31.57,
+                "basis_adjustment_total_eur": 0.0,
+                "total_basis_eur": 31.57,
+                "average_basis_eur": 15.785,
+                "basis_method": "move_in_fmv_reset",
+                "source_file": "seed.csv",
+            }
+        ],
+    )
+    trade_history_path = tmp_path / "history.xml"
+    _write_trade_history_xml(
+        trade_history_path,
+        [
+            _trade_confirm_row(
+                ticker="T",
+                isin="US00206R1023",
+                sub_category="COMMON",
+                trade_date="2025-01-30",
+                date_time="2025-01-30 11:55:06",
+                operation="SELL",
+                quantity="-2",
+                price="24.115",
+                trade_id="sell-1",
+            ),
+        ],
+    )
+    closed_lot_path = tmp_path / "closed.xml"
+    _write_closed_lot_xml(closed_lot_path, [])
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 5, 1), date(2025, 1, 30)],
+            Column.currency: ["USD", "USD"],
+            Column.exchange_rate: [1.0, 1.0],
+        }
+    )
+
+    detail_df, _, state_df, events_df = process_trades_ibkr(
+        exchange_rates_df=rates_df,
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 12, 31),
+        austrian_opening_state_path=str(opening_path),
+        ibkr_trade_history_path=str(trade_history_path),
+    )
+
+    assert detail_df is not None
+    assert detail_df["ticker"].to_list() == ["T"]
+    assert state_df is not None
+    assert state_df["quantity"].to_list() == [0.0]
+    assert events_df is not None
+    assert events_df.filter(pl.col("event_type") == "sell")["ticker"].to_list() == ["T"]
+
+
+def test_process_trades_ibkr_without_snapshot_replays_prior_raw_buys_into_moving_average_basis(tmp_path: Path):
     trade_history_path = tmp_path / "history.xml"
     _write_trade_history_xml(
         trade_history_path,
@@ -1872,23 +1712,7 @@ def test_process_trades_ibkr_without_snapshot_replays_prior_raw_buys_and_ignores
         ],
     )
     closed_lot_path = tmp_path / "closed.xml"
-    _write_closed_lot_xml(
-        closed_lot_path,
-        [
-            _closed_lot_row(
-                ticker="MSFT",
-                isin="US5949181045",
-                sub_category="COMMON",
-                sale_date="2025-03-01",
-                sale_datetime="2025-03-01 11:00:00",
-                buy_datetime="2024-10-10 09:30:00",
-                quantity="2",
-                cost="200.5",
-                pnl="59.0",
-                sale_trade_id="broker-sell-1",
-            )
-        ],
-    )
+    _write_closed_lot_xml(closed_lot_path, [])
     rates_df = pl.DataFrame(
         {
             Column.rate_date: [date(2024, 10, 10), date(2025, 3, 1)],
@@ -1897,8 +1721,7 @@ def test_process_trades_ibkr_without_snapshot_replays_prior_raw_buys_and_ignores
         }
     )
 
-    detail_df, summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    detail_df, summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2025, 1, 1),
         end_date=date(2025, 12, 31),
@@ -1907,20 +1730,13 @@ def test_process_trades_ibkr_without_snapshot_replays_prior_raw_buys_and_ignores
 
     assert detail_df is not None
     assert summary_df is not None
-    assert stock_lot_state_df is not None
-    assert trades_reconciliation_df is not None
-    assert detail_df["basis_origin"].to_list() == ["post_move_buy"]
+    assert stock_position_state_df is not None
     assert detail_df["taxable_original_basis_eur"].to_list() == [200.0]
     assert detail_df["taxable_proceeds_eur"].to_list() == [260.0]
     assert detail_df["taxable_gain_loss_eur"].to_list() == [60.0]
-    assert detail_df["allocated_buy_fee_eur"].to_list() == [0.5]
-    assert detail_df["allocated_sale_fee_eur"].to_list() == [0.5]
-    assert trades_reconciliation_df["reconciliation_status"].to_list() == ["matched"]
-    assert trades_reconciliation_df["sale_aggregate_status"].to_list() == ["matched"]
-    lot_row = stock_lot_state_df.filter(pl.col("lot_id") == "MSFT:2024-10-10:buy-2024-1")
-    assert lot_row["status"].to_list() == ["closed"]
-    assert lot_row["remaining_quantity"].to_list() == [0.0]
-    assert lot_row["initial_original_cost_eur"].to_list() == [200.0]
+    assert stock_position_state_df["quantity"].to_list() == [0.0]
+    assert stock_position_events_df is not None
+    assert stock_position_events_df.filter(pl.col("event_type") == "sell")["realized_gain_loss_eur"].to_list() == [60.0]
 
 
 def test_process_trades_ibkr_requires_snapshot_when_authoritative_start_date_is_set(tmp_path: Path):
@@ -1951,9 +1767,8 @@ def test_process_trades_ibkr_requires_snapshot_when_authoritative_start_date_is_
         }
     )
 
-    with pytest.raises(ValueError, match="authoritative_start_date requires austrian_opening_lots_path"):
+    with pytest.raises(ValueError, match="authoritative_start_date requires austrian_opening_state_path"):
         process_trades_ibkr(
-            xml_file_path=str(closed_lot_path),
             exchange_rates_df=rates_df,
             start_date=date(2025, 1, 1),
             end_date=date(2025, 12, 31),
@@ -1990,8 +1805,7 @@ def test_process_trades_ibkr_quiet_year_keeps_open_lot_state(tmp_path: Path):
         }
     )
 
-    detail_df, summary_df, stock_lot_state_df, trades_reconciliation_df = process_trades_ibkr(
-        xml_file_path=str(closed_lot_path),
+    detail_df, summary_df, stock_position_state_df, stock_position_events_df = process_trades_ibkr(
         exchange_rates_df=rates_df,
         start_date=date(2025, 1, 1),
         end_date=date(2025, 12, 31),
@@ -2000,13 +1814,13 @@ def test_process_trades_ibkr_quiet_year_keeps_open_lot_state(tmp_path: Path):
 
     assert detail_df is None
     assert summary_df is None
-    assert trades_reconciliation_df is None
-    assert stock_lot_state_df is not None
-    assert stock_lot_state_df["ticker"].to_list() == ["MSFT"]
-    assert stock_lot_state_df["status"].to_list() == ["open"]
-    assert stock_lot_state_df["remaining_quantity"].to_list() == [2.0]
-    assert stock_lot_state_df["original_cost_eur"].to_list() == [200.0]
-    assert stock_lot_state_df["initial_original_cost_eur"].to_list() == [200.0]
+    assert stock_position_events_df is None
+    assert stock_position_state_df is not None
+    assert stock_position_state_df["ticker"].to_list() == ["MSFT"]
+    assert stock_position_state_df["status"].to_list() == ["open"]
+    assert stock_position_state_df["quantity"].to_list() == [2.0]
+    assert stock_position_state_df["base_cost_total_eur"].to_list() == [200.0]
+    assert stock_position_state_df["total_basis_eur"].to_list() == [200.0]
 
 
 def test_calculate_summary_ibkr_rejects_duplicate_sections(dividends_country_summary_df):

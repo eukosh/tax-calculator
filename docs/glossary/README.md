@@ -47,9 +47,9 @@ Use glossary pages here for:
 ## Naming Rules
 
 - Files under `data/output/<person>/...` are generated artifacts or persisted state.
-- `ledger` files describe lot state.
+- `ledger` files describe legacy lot state.
 - `summary` files are human-readable rollups, usually markdown.
 - `reconciliation` or `review` files are audit/supporting artifacts, not filing outputs.
-- Core stock `trades_tax_df` is tax-only.
-- Core stock broker matching lives in `trades_reconciliation`.
+- Core stock `stock_tax_sales` is the sale-only tax artifact.
+- Core stock `stock_tax_position_events` is the audit trail.
 - ETF sales and non-reporting-fund sales still expose `taxable_stepup_basis_eur` because step-up basis is part of those workflows.

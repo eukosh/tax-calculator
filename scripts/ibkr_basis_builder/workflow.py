@@ -8,9 +8,10 @@ from pathlib import Path
 import lxml.etree as etree
 import polars as pl
 
-from scripts.reporting_funds.models import IbkrTrade, Lot, round_money, round_qty
-from scripts.reporting_funds.workflow import apply_trade, build_fx_table, get_fx_rate
-from src.tax_lots import RawBrokerTrade, load_ibkr_stock_like_trades
+from scripts.reporting_funds.models import IbkrTrade, round_money, round_qty
+from scripts.reporting_funds.workflow import build_fx_table, get_fx_rate
+from src.moving_average import build_buy_event, build_sell_event, replay_events
+from src.broker_history import RawBrokerTrade, load_ibkr_stock_like_trades
 
 RAW_IBKR_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 SUPPORTED_ASSET_CLASSES = {"ETF", "COMMON", "REIT", "ADR"}
@@ -29,7 +30,7 @@ class SnapshotHolding:
     isin: str
     asset_class: str
     currency: str
-    remaining_quantity: float
+    quantity: float
 
 
 def _resolve_file_paths(xml_file_path: str) -> list[str]:
@@ -68,7 +69,6 @@ def load_ibkr_stock_and_etf_trades(xml_file_path: str, *, cutoff_date: date) -> 
                 price_ccy=trade.price_ccy,
                 currency=trade.currency,
                 trade_id=trade.trade_id,
-                account_id=trade.account_id,
                 source_statement_file=trade.source_statement_file,
             ),
             asset_class=trade.asset_class,
@@ -122,33 +122,6 @@ def _lookup_price(
     raise ValueError(f"Missing move-in price for {ticker} ({isin})")
 
 
-def _build_snapshot_holdings(lots: list[Lot], asset_class_by_lot_id: dict[str, str]) -> list[SnapshotHolding]:
-    aggregated: dict[tuple[str, str, str, str], float] = {}
-    for lot in lots:
-        if lot.remaining_quantity <= 0:
-            continue
-        key = (
-            lot.ticker,
-            lot.isin,
-            asset_class_by_lot_id.get(lot.lot_id, ""),
-            lot.currency,
-        )
-        aggregated[key] = round_qty(aggregated.get(key, 0.0) + lot.remaining_quantity)
-
-    holdings = [
-        SnapshotHolding(
-            ticker=ticker,
-            isin=isin,
-            asset_class=asset_class,
-            currency=currency,
-            remaining_quantity=round_qty(quantity),
-        )
-        for (ticker, isin, asset_class, currency), quantity in aggregated.items()
-    ]
-    holdings.sort(key=lambda item: (item.asset_class, item.ticker, item.isin))
-    return holdings
-
-
 def write_move_in_price_template(
     path: str | Path,
     *,
@@ -164,7 +137,7 @@ def write_move_in_price_template(
                 "isin": holding.isin,
                 "asset_class": holding.asset_class,
                 "currency": holding.currency,
-                "remaining_quantity": holding.remaining_quantity,
+                "quantity": holding.quantity,
                 "cutoff_date": cutoff_date.isoformat(),
                 "price_ccy": "",
             }
@@ -172,47 +145,6 @@ def write_move_in_price_template(
         ]
     ).write_csv(template_path)
     return template_path
-
-
-def _snapshot_to_df(rows: list[dict[str, object]]) -> pl.DataFrame:
-    schema = {
-        "snapshot_date": pl.String,
-        "asset_class": pl.String,
-        "ticker": pl.String,
-        "isin": pl.String,
-        "lot_id": pl.String,
-        "buy_date": pl.String,
-        "original_quantity": pl.Float64,
-        "remaining_quantity": pl.Float64,
-        "currency": pl.String,
-        "buy_price_ccy": pl.Float64,
-        "buy_fx_to_eur": pl.Float64,
-        "original_cost_eur": pl.Float64,
-        "buy_fee_eur_total": pl.Float64,
-        "cumulative_oekb_stepup_eur": pl.Float64,
-        "adjusted_basis_eur": pl.Float64,
-        "status": pl.String,
-        "broker": pl.String,
-        "account_id": pl.String,
-        "notes": pl.String,
-        "last_adjustment_year": pl.String,
-        "last_adjustment_reference": pl.String,
-        "last_sale_date": pl.String,
-        "sold_quantity_ytd": pl.Float64,
-        "source_trade_id": pl.String,
-        "source_statement_file": pl.String,
-        "broker_buy_date": pl.String,
-        "broker_buy_price_ccy": pl.Float64,
-        "broker_buy_fx_to_eur": pl.Float64,
-        "broker_original_cost_eur": pl.Float64,
-        "broker_buy_fee_eur": pl.Float64,
-        "austrian_basis_method": pl.String,
-        "austrian_basis_price_ccy": pl.Float64,
-        "austrian_basis_fx_to_eur": pl.Float64,
-    }
-    if not rows:
-        return pl.DataFrame(schema=schema)
-    return pl.DataFrame(rows).sort(["asset_class", "ticker", "isin", "lot_id"])
 
 
 def build_opening_lot_snapshot(
@@ -236,17 +168,58 @@ def build_opening_lot_snapshot(
         currencies=currencies,
     )
 
-    lots: list[Lot] = []
-    asset_class_by_lot_id: dict[str, str] = {}
-    broker_buy_fee_eur_by_lot_id: dict[str, float] = {}
+    replayable_events = []
     for basis_trade in basis_trades:
-        apply_trade(lots, basis_trade.trade, fx_table=fx_table, sale_rows=None, track_ytd=False)
+        trade_fx = get_fx_rate(fx_table, basis_trade.trade.currency, basis_trade.trade.trade_date)
         if basis_trade.trade.operation == "buy":
-            created_lot = lots[-1]
-            asset_class_by_lot_id[created_lot.lot_id] = basis_trade.asset_class
-            broker_buy_fee_eur_by_lot_id[created_lot.lot_id] = round_money(basis_trade.fee_ccy / created_lot.buy_fx_to_eur)
+            replayable_events.append(
+                build_buy_event(
+                    broker="ibkr",
+                    ticker=basis_trade.trade.ticker,
+                    isin=basis_trade.trade.isin,
+                    currency=basis_trade.trade.currency,
+                    asset_class=basis_trade.asset_class,
+                    trade_date=basis_trade.trade.trade_date,
+                    quantity=basis_trade.trade.quantity,
+                    price_ccy=basis_trade.trade.price_ccy,
+                    fx_to_eur=trade_fx,
+                    source_id=basis_trade.trade.trade_id,
+                    source_file=basis_trade.trade.source_statement_file,
+                    sequence_key=len(replayable_events),
+                )
+            )
+            continue
+        replayable_events.append(
+            build_sell_event(
+                broker="ibkr",
+                ticker=basis_trade.trade.ticker,
+                isin=basis_trade.trade.isin,
+                currency=basis_trade.trade.currency,
+                asset_class=basis_trade.asset_class,
+                trade_date=basis_trade.trade.trade_date,
+                quantity=basis_trade.trade.quantity,
+                price_ccy=basis_trade.trade.price_ccy,
+                fx_to_eur=trade_fx,
+                source_id=basis_trade.trade.trade_id,
+                source_file=basis_trade.trade.source_statement_file,
+                sequence_key=len(replayable_events),
+            )
+        )
 
-    holdings = _build_snapshot_holdings(lots, asset_class_by_lot_id)
+    states, _, _ = replay_events([], replayable_events)
+    asset_class_by_position = {(state.ticker, state.isin, state.currency): state.asset_class for state in states}
+    holdings = [
+        SnapshotHolding(
+            ticker=state.ticker,
+            isin=state.isin,
+            asset_class=state.asset_class,
+            currency=state.currency,
+            quantity=round_qty(state.quantity),
+        )
+        for state in states
+        if state.quantity > 0
+    ]
+    holdings.sort(key=lambda item: (item.asset_class, item.ticker, item.isin))
     try:
         price_rows = _load_price_rows(move_in_price_csv_path, cutoff_date=cutoff_date)
     except FileNotFoundError as exc:
@@ -265,67 +238,50 @@ def build_opening_lot_snapshot(
     snapshot_rows: list[dict[str, object]] = []
     missing_holdings: list[SnapshotHolding] = []
 
-    for lot in lots:
-        if lot.remaining_quantity <= 0:
+    for state in states:
+        if state.quantity <= 0:
             continue
         try:
-            basis_price_ccy, basis_currency = _lookup_price(price_rows, isin=lot.isin, ticker=lot.ticker)
+            basis_price_ccy, basis_currency = _lookup_price(price_rows, isin=state.isin, ticker=state.ticker)
         except ValueError:
             missing_holdings.append(
                 SnapshotHolding(
-                    ticker=lot.ticker,
-                    isin=lot.isin,
-                    asset_class=asset_class_by_lot_id.get(lot.lot_id, ""),
-                    currency=lot.currency,
-                    remaining_quantity=round_qty(lot.remaining_quantity),
+                    ticker=state.ticker,
+                    isin=state.isin,
+                    asset_class=state.asset_class,
+                    currency=state.currency,
+                    quantity=round_qty(state.quantity),
                 )
             )
             continue
-        if basis_currency != lot.currency:
+        if basis_currency != state.currency:
             raise ValueError(
-                f"Move-in price currency {basis_currency} does not match lot currency {lot.currency} for {lot.ticker} ({lot.isin})"
+                f"Move-in price currency {basis_currency} does not match position currency {state.currency} for {state.ticker} ({state.isin})"
             )
         basis_fx = get_fx_rate(fx_table, basis_currency, cutoff_date)
-        original_quantity = round_qty(lot.remaining_quantity)
+        original_quantity = round_qty(state.quantity)
         original_cost_eur = round_money((original_quantity * basis_price_ccy) / basis_fx)
         notes = (
-            f"Bootstrap Austrian opening lot as of {cutoff_date.isoformat()} from pre-cutoff economic lot {lot.lot_id}"
+            f"Bootstrap Austrian opening position as of {cutoff_date.isoformat()} from pre-cutoff broker history"
         )
         snapshot_rows.append(
             {
                 "snapshot_date": cutoff_date.isoformat(),
-                "asset_class": asset_class_by_lot_id.get(lot.lot_id, ""),
-                "ticker": lot.ticker,
-                "isin": lot.isin,
-                "lot_id": lot.lot_id,
-                "buy_date": cutoff_date.isoformat(),
-                "original_quantity": original_quantity,
-                "remaining_quantity": original_quantity,
-                "currency": lot.currency,
-                "buy_price_ccy": round_money(basis_price_ccy),
-                "buy_fx_to_eur": round_money(basis_fx),
-                "original_cost_eur": original_cost_eur,
-                "buy_fee_eur_total": 0.0,
-                "cumulative_oekb_stepup_eur": 0.0,
-                "adjusted_basis_eur": original_cost_eur,
-                "status": "open",
                 "broker": "ibkr",
-                "account_id": lot.account_id,
+                "ticker": state.ticker,
+                "isin": state.isin,
+                "currency": state.currency,
+                "asset_class": asset_class_by_position.get((state.ticker, state.isin, state.currency), ""),
+                "quantity": original_quantity,
+                "base_cost_total_eur": original_cost_eur,
+                "basis_adjustment_total_eur": 0.0,
+                "total_basis_eur": original_cost_eur,
+                "average_basis_eur": round_money(original_cost_eur / original_quantity) if original_quantity else 0.0,
+                "status": "open",
+                "last_event_date": cutoff_date.isoformat(),
+                "basis_method": "move_in_fmv_reset",
                 "notes": notes,
-                "last_adjustment_year": "",
-                "last_adjustment_reference": "",
-                "last_sale_date": "",
-                "sold_quantity_ytd": 0.0,
-                "source_trade_id": lot.source_trade_id,
-                "source_statement_file": lot.source_statement_file,
-                "broker_buy_date": lot.buy_date.isoformat(),
-                "broker_buy_price_ccy": round_money(lot.buy_price_ccy),
-                "broker_buy_fx_to_eur": round_money(lot.buy_fx_to_eur),
-                "broker_original_cost_eur": round_money(lot.original_cost_eur),
-                "broker_buy_fee_eur": round_money(broker_buy_fee_eur_by_lot_id.get(lot.lot_id, 0.0)),
-                "austrian_basis_method": "move_in_fmv_reset",
-                "austrian_basis_price_ccy": round_money(basis_price_ccy),
-                "austrian_basis_fx_to_eur": round_money(basis_fx),
+                "source_file": state.source_file,
             }
         )
 
@@ -342,5 +298,5 @@ def build_opening_lot_snapshot(
 
     output_file_path = Path(output_path)
     output_file_path.parent.mkdir(parents=True, exist_ok=True)
-    _snapshot_to_df(snapshot_rows).write_csv(output_file_path)
+    pl.DataFrame(snapshot_rows).sort(["asset_class", "ticker", "isin"]).write_csv(output_file_path)
     return output_file_path

@@ -155,6 +155,12 @@ def load_oekb_report(path: str | Path, tax_year: int | None = None, ticker_by_is
         creditable_foreign_tax_per_share_ccy=_find_numeric_value_by_code(lines, "10288"),
         acquisition_cost_correction_per_share_ccy=_find_numeric_value_by_code(lines, "10289"),
         source_file=str(report_path),
+        domestic_dividends_loss_offset_per_share_ccy=(
+            _find_optional_numeric_value_by_code(lines, "10759") or 0.0
+        ),
+        domestic_dividend_kest_per_share_ccy=(
+            _find_optional_numeric_value_by_code(lines, "10760") or 0.0
+        ),
         total_shares_at_inflow=(
             round_money(_parse_decimal(_find_optional_value(lines, "Anzahl Anteile zum Zuflusszeitpunkt")))
             if _find_optional_value(lines, "Anzahl Anteile zum Zuflusszeitpunkt")

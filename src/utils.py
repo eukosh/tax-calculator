@@ -252,14 +252,16 @@ def build_separate_trade_profit_loss_rows(
 def calculate_kest(
     df: pl.DataFrame, amount_col: str, tax_withheld_col: str | None = None, net_col_name: str | None = None
 ) -> pl.DataFrame:
-    # Net Austrian KESt=Austrian KESt on Gross amount − min(Foreign Withholding Tax,Treaty Rate × Gross Dividends)
+    # Net Austrian KESt=Austrian KESt on Gross amount − min(Foreign Withholding Tax,Treaty Rate × Gross Dividends)
     # keep in mind that witholding tax is negative number, it causes error in formula
-    kest_gross = pl.col(amount_col) * KEST_RATE
+    # Negative capital amounts represent losses. They should remain losses, not create negative KESt.
+    taxable_amount = pl.col(amount_col).clip(lower_bound=0.0)
+    kest_gross = taxable_amount * KEST_RATE
     kest_net = (
         (kest_gross)
         - pl.min_horizontal(
             pl.col(tax_withheld_col),
-            MAX_DTT_RATE * pl.col(amount_col),
+            MAX_DTT_RATE * taxable_amount,
         )
         if tax_withheld_col
         else kest_gross

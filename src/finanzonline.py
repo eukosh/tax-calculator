@@ -14,10 +14,10 @@ ORDINARY_CAPITAL_INCOME_LABEL = "Capital income 27.5% (dividends/interest)"
 TRADE_PROFIT_LABEL = "Trade profits 27.5%"
 TRADE_LOSS_LABEL = "Trade losses 27.5% (enter as negative)"
 ETF_DISTRIBUTIONS_LABEL = "ETF distributions 27.5%"
-WITHHELD_FOREIGN_TAX_LABEL = "Foreign tax withheld"
+WITHHELD_FOREIGN_TAX_LABEL = "Foreign tax withheld (raw)"
+PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL = "Creditable foreign tax before loss offset"
 CREDITABLE_FOREIGN_TAX_LABEL = "Creditable foreign tax"
 
-WITHHELD_FOREIGN_TAX_METRIC_LABEL = "Foreign tax withheld"
 CREDITABLE_FOREIGN_TAX_METRIC_LABEL = "Creditable foreign tax"
 ESTIMATED_BASE_LABEL = "Total tax base 27.5%"
 ESTIMATED_TAX_LABEL = "Estimated Austrian tax"
@@ -70,10 +70,12 @@ def _sum_df_column(df: pl.DataFrame, column_name: str) -> float:
 
 
 def _coarse_bucket_category(row_type: str, amount_eur: float) -> str:
-    if row_type in {"", "dividends", "bonds"}:
+    if row_type in {"", "dividends"}:
         return ORDINARY_INCOME_BUCKET_CATEGORY
     if row_type == "ETF div":
         return ETF_DISTRIBUTION_BUCKET_CATEGORY
+    if row_type == "bonds":
+        return TRADE_PROFIT_BUCKET_CATEGORY if amount_eur >= 0 else TRADE_LOSS_BUCKET_CATEGORY
     if row_type == "trades profit":
         return TRADE_PROFIT_BUCKET_CATEGORY
     if row_type == "trades loss":
@@ -211,6 +213,10 @@ def build_finanzonline_report(
     trade_profit = _sum_bucket_amount_by_category(buckets_df, TRADE_PROFIT_BUCKET_CATEGORY)
     trade_loss = _sum_bucket_amount_by_category(buckets_df, TRADE_LOSS_BUCKET_CATEGORY)
     withheld_foreign_tax = _sum_df_column(buckets_df, BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL)
+    pre_loss_creditable_foreign_tax = _sum_df_column(
+        buckets_df.filter(pl.col(BUCKET_AMOUNT_EUR_COL) > 0),
+        BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL,
+    )
     creditable_foreign_tax = _calculate_creditable_foreign_tax_after_loss(buckets_df, loss_offset_method)
 
     estimated_base = max(_sum_df_column(buckets_df, BUCKET_AMOUNT_EUR_COL), 0.0)
@@ -224,6 +230,7 @@ def build_finanzonline_report(
                 TRADE_LOSS_LABEL,
                 ETF_DISTRIBUTIONS_LABEL,
                 WITHHELD_FOREIGN_TAX_LABEL,
+                PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL,
                 CREDITABLE_FOREIGN_TAX_LABEL,
             ],
             AMOUNT_EUR_COL: [
@@ -232,6 +239,7 @@ def build_finanzonline_report(
                 _round_amount(trade_loss),
                 _round_amount(etf_distributions),
                 _round_amount(withheld_foreign_tax),
+                _round_amount(pre_loss_creditable_foreign_tax),
                 _round_amount(creditable_foreign_tax),
             ],
         }
@@ -240,13 +248,11 @@ def build_finanzonline_report(
     estimate_df = pl.DataFrame(
         {
             ESTIMATE_LABEL_COL: [
-                WITHHELD_FOREIGN_TAX_METRIC_LABEL,
                 CREDITABLE_FOREIGN_TAX_METRIC_LABEL,
                 ESTIMATED_BASE_LABEL,
                 ESTIMATED_TAX_LABEL,
             ],
             AMOUNT_EUR_COL: [
-                _round_amount(withheld_foreign_tax),
                 _round_amount(creditable_foreign_tax),
                 _round_amount(estimated_base),
                 _round_amount(estimated_tax),

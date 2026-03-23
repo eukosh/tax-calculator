@@ -82,6 +82,31 @@ def test_calculate_kest(dividends_euro_df, expected_df, tax_withheld_col):
     assert_frame_equal(expected_df, result)
 
 
+def test_calculate_kest_clips_negative_amounts_to_zero_tax():
+    df = pl.DataFrame(
+        {
+            Column.date: [date(2025, 1, 2)],
+            Column.currency: ["USD"],
+            Column.profit_euro: [-100.0],
+        }
+    )
+
+    result = calculate_kest(df, amount_col=Column.profit_euro)
+
+    expected = pl.DataFrame(
+        {
+            Column.date: [date(2025, 1, 2)],
+            Column.currency: ["USD"],
+            Column.profit_euro: [-100.0],
+            Column.kest_gross: [0.0],
+            Column.kest_net: [0.0],
+            Column.profit_euro_net: [-100.0],
+        }
+    )
+
+    assert_frame_equal(expected, result)
+
+
 XML_CONTENT_1 = """\
 <root>
     <record id="1" name="test1" value="10"/>
