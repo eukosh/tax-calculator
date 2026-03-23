@@ -1469,6 +1469,125 @@ def test_reporting_funds_workflow_resolves_same_year_distribution_and_writes_pay
     assert rerun_notes.count("matched by actionID-aware broker payout event") == 1
 
 
+def test_reporting_funds_sale_after_ex_date_realizes_oekb_basis_adjustment(tmp_path: Path) -> None:
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2025-01-01", "USD", 1.0),
+            ("2025-12-11", "USD", 1.0),
+            ("2025-12-18", "USD", 1.0),
+            ("2025-12-24", "USD", 1.0),
+        ],
+    )
+    trade_history_path = tmp_path / "trade_history.xml"
+    _write_trade_xml(
+        trade_history_path,
+        [
+            _trade_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                trade_date="2025-01-01",
+                date_time="2025-01-01 10:00:00",
+                operation="BUY",
+                quantity="10",
+                price="100",
+                transaction_id="buy-1",
+            ),
+            _trade_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                trade_date="2025-12-18",
+                date_time="2025-12-18 10:00:00",
+                operation="SELL",
+                quantity="-10",
+                price="101",
+                transaction_id="sell-1",
+            ),
+        ],
+    )
+    tax_xml_path = tmp_path / "tax.xml"
+    _write_tax_xml(
+        tax_xml_path,
+        cash_rows=[
+            _cash_dividend_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                settle_date="2025-12-24",
+                ex_date="2025-12-11",
+                amount="0.735",
+                action_id="idtl-1",
+                report_date="2025-12-30",
+            )
+        ],
+        accrual_rows=[
+            _accrual_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                report_date="2025-12-11",
+                effective_date="2025-12-10",
+                ex_date="2025-12-11",
+                pay_date="2025-12-24",
+                quantity="10",
+                code="Po",
+                action_id="idtl-1",
+                gross_rate="0.0735",
+                gross_amount="0.735",
+            ),
+            _accrual_row(
+                ticker="IDTL",
+                isin="IE00BSKRJZ44",
+                report_date="2025-12-30",
+                effective_date="2025-12-24",
+                ex_date="2025-12-11",
+                pay_date="2025-12-24",
+                quantity="10",
+                code="Re",
+                action_id="idtl-1",
+                gross_rate="0.0735",
+                gross_amount="-0.735",
+            ),
+        ],
+    )
+    oekb_root = tmp_path / "oekb"
+    _write_oekb_file(
+        oekb_root / "2025" / "idtl_distribution.csv",
+        isin="IE00BSKRJZ44",
+        meldedatum="22.12.2025",
+        jahresmeldung="NEIN",
+        ausschuettungsmeldung="JA",
+        ausschuettungstag="24.12.2025",
+        ex_tag="11.12.2025",
+        value_10289="-0,0735",
+    )
+
+    output_paths = run_workflow(
+        person="eugene",
+        tax_year=2025,
+        ibkr_tax_xml_path=tax_xml_path,
+        ibkr_trade_history_path=trade_history_path,
+        raw_exchange_rates_path=rates_path,
+        oekb_root_dir=oekb_root,
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "output",
+        strict_unresolved_payouts=False,
+    )
+
+    sales_df = pl.read_csv(output_paths["sales"])
+    basis_df = pl.read_csv(output_paths["basis_adjustments"])
+    state_df = pl.read_csv(output_paths["state"])
+
+    assert basis_df["shares_held_on_eligibility_date"].to_list() == [10.0]
+    assert basis_df["basis_stepup_total_eur"].to_list() == [-0.735]
+    assert sales_df["sale_date"].to_list() == ["2025-12-18"]
+    assert sales_df["realized_base_cost_eur"].to_list() == [1000.0]
+    assert sales_df["realized_oekb_adjustment_eur"].to_list() == [-0.735]
+    assert sales_df["taxable_total_basis_eur"].to_list() == [999.265]
+    assert sales_df["taxable_gain_loss_eur"].to_list() == [10.735]
+    assert state_df["quantity"].to_list() == [0.0]
+    assert state_df["total_basis_eur"].to_list() == [0.0]
+
+
 def test_reporting_funds_workflow_fails_when_same_year_payout_remains_unresolved(tmp_path: Path) -> None:
     rates_path = tmp_path / "rates.csv"
     _write_rates_csv(

@@ -167,7 +167,7 @@ Do not rely on the core app for these.
 
 You need:
 
-- the yearly IBKR tax XML for the filing year
+- the IBKR tax XML coverage for the filing year
 - as much historical IBKR tax XML as you have
 - raw IBKR ETF trade history
 
@@ -175,6 +175,11 @@ Put them under:
 
 - yearly tax XML: `data/input/<person>/<year>/`
 - raw trade history: `data/input/<person>/ibkr/trades/`
+
+Important:
+
+- `--ibkr-tax-xml-path` can be a file, directory, or glob, but it must cover the full filing year
+- if the filing year is split across multiple broker exports, pass a glob or directory that includes all of them
 
 Strong recommendation:
 

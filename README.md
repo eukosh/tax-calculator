@@ -10,6 +10,11 @@ This repo currently has three main tax-calculation surfaces:
 - Reporting-fund ETF workflow in [`scripts/reporting_funds/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/reporting_funds/README.md)
 - Non-reporting-fund exit workflow in [`scripts/non_reporting_funds_exit/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/non_reporting_funds_exit/README.md)
 
+## What's not implemented yet
+- Freedom finance trades are not on moving average basis, after 2026 tax year probably freedom will be decomissioned.
+
+- From the debt products currently IBKR supports correctly only T-Bills, bonds with coupons are not supported yet.
+
 ## Core App
 
 The core app owns the normal yearly multi-broker summary flow.

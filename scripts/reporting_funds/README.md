@@ -47,7 +47,8 @@ Practical rule:
 
 - `--ibkr-trade-history-path`: provide full raw ETF trade history
 - `--historical-ibkr-tax-xml-path`: provide broad historical IBKR tax XML coverage
-- `--ibkr-tax-xml-path`: provide the target-year IBKR tax XML
+- `--ibkr-tax-xml-path`: provide full filing-year IBKR tax XML coverage; it can be one file, a directory, or a glob
+- if one filing year is split across multiple exports, pass a glob or directory that includes all of them
 
 The workflow can resolve correctly with narrower inputs in simple cases, but broad history is safer and avoids false manual-review blockers.
 
@@ -69,7 +70,7 @@ Use a `2024` carryforward-only run to build the first Austrian ETF carryforward 
 
 Main inputs:
 
-- target-year IBKR tax XML
+- filing-year IBKR tax XML coverage
 - historical IBKR tax XML lookup coverage
 - raw IBKR ETF trade history
 - OeKB root directory

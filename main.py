@@ -34,19 +34,21 @@ logging.basicConfig(
     format="%(levelname)s: %(message)s\n",
 )
 
-
-# person = "oryna"
-person = "eugene"
+person = "oryna"
+# person = "eugene"
 # IBKR tax XML input can be:
 # - one XML file
 # - a wildcard string
 # - a directory
 # - a list of any of the above
-ibkr_input_path = [
-    # "data/input/oryna/2024/ibkr_20241120_20251120.xml",
-    # "data/input/oryna/2025/ibkr_20251118_20260318.xml",
-    "data/input/eugene/2025/ibkr_20250101_20260101.xml"
-]
+ibkr_input_path = (
+    [
+        "data/input/oryna/2024/ibkr_20241120_20251120.xml",
+        "data/input/oryna/2025/ibkr_20251118_20260318.xml",
+    ]
+    if person == "oryna"
+    else ["data/input/eugene/2025/ibkr_20250101_20260101.xml"]
+)
 
 ibkr_trade_history_path: str | None = f"data/input/{person}/ibkr/trades/*.xml"
 austrian_opening_state_path: str | None = (
