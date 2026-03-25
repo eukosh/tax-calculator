@@ -16,6 +16,7 @@ ORDINARY_CAPITAL_INCOME_LABEL = "Capital income 27.5% (dividends/interest)"
 TRADE_PROFIT_LABEL = "Trade profits 27.5%"
 TRADE_LOSS_LABEL = "Trade losses 27.5% (enter as negative)"
 ETF_DISTRIBUTIONS_LABEL = "ETF distributions 27.5%"
+REIT_DISTRIBUTIONS_LABEL = "REIT distributions 27.5%"
 WITHHELD_FOREIGN_TAX_LABEL = "Foreign tax withheld (raw)"
 PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL = "Creditable foreign tax before loss offset"
 CREDITABLE_FOREIGN_TAX_LABEL = "Creditable foreign tax"
@@ -29,6 +30,7 @@ LOSS_OFFSET_METHOD_PROPORTIONAL = "proportional"
 
 ORDINARY_INCOME_BUCKET_CATEGORY = "ordinary_income"
 ETF_DISTRIBUTION_BUCKET_CATEGORY = "etf_distribution"
+REIT_DISTRIBUTION_BUCKET_CATEGORY = "reit_distribution"
 TRADE_PROFIT_BUCKET_CATEGORY = "trade_profit"
 TRADE_LOSS_BUCKET_CATEGORY = "trade_loss"
 
@@ -76,6 +78,8 @@ def _coarse_bucket_category(row_type: str, amount_eur: Decimal) -> str:
         return ORDINARY_INCOME_BUCKET_CATEGORY
     if row_type == "ETF div":
         return ETF_DISTRIBUTION_BUCKET_CATEGORY
+    if row_type == "REIT div":
+        return REIT_DISTRIBUTION_BUCKET_CATEGORY
     if row_type == "bonds":
         return TRADE_PROFIT_BUCKET_CATEGORY if amount_eur >= 0 else TRADE_LOSS_BUCKET_CATEGORY
     if row_type == "trades profit":
@@ -214,6 +218,7 @@ def build_finanzonline_report(
 
     ordinary_income = _sum_bucket_amount_by_category(buckets_df, ORDINARY_INCOME_BUCKET_CATEGORY)
     etf_distributions = _sum_bucket_amount_by_category(buckets_df, ETF_DISTRIBUTION_BUCKET_CATEGORY)
+    reit_distributions = _sum_bucket_amount_by_category(buckets_df, REIT_DISTRIBUTION_BUCKET_CATEGORY)
     trade_profit = _sum_bucket_amount_by_category(buckets_df, TRADE_PROFIT_BUCKET_CATEGORY)
     trade_loss = _sum_bucket_amount_by_category(buckets_df, TRADE_LOSS_BUCKET_CATEGORY)
     withheld_foreign_tax = _sum_df_column(buckets_df, BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL)
@@ -233,6 +238,7 @@ def build_finanzonline_report(
                 TRADE_PROFIT_LABEL,
                 TRADE_LOSS_LABEL,
                 ETF_DISTRIBUTIONS_LABEL,
+                REIT_DISTRIBUTIONS_LABEL,
                 WITHHELD_FOREIGN_TAX_LABEL,
                 PRE_LOSS_CREDITABLE_FOREIGN_TAX_LABEL,
                 CREDITABLE_FOREIGN_TAX_LABEL,
@@ -242,6 +248,7 @@ def build_finanzonline_report(
                 _round_amount(trade_profit),
                 _round_amount(trade_loss),
                 _round_amount(etf_distributions),
+                _round_amount(reit_distributions),
                 _round_amount(withheld_foreign_tax),
                 _round_amount(pre_loss_creditable_foreign_tax),
                 _round_amount(creditable_foreign_tax),

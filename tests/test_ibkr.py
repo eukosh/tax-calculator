@@ -249,7 +249,7 @@ def test_process_cash_transactions_ibkr(
     exclude_etf,
     dividends_country_summary_no_etf_df,
 ):
-    res_df, etf_df = process_cash_transactions_ibkr(
+    res_df, etf_df, _ = process_cash_transactions_ibkr(
         "tests/test_data/ibkr/For_tax_automation*",
         rates_df,
         start_date=REPORTING_START_DATE,
@@ -1060,7 +1060,7 @@ def test_core_ibkr_excludes_etfs_from_trades_cash_and_finanzonline_buckets(tmp_p
         excluded_trade_subcategories={"ETF"},
         ibkr_trade_history_path=str(trade_history_path),
     )
-    dividends_df, etf_dividends_df = process_cash_transactions_ibkr(
+    dividends_df, etf_dividends_df, _ = process_cash_transactions_ibkr(
         xml_file_path=str(xml_path),
         exchange_rates_df=rates_df,
         start_date=date(2024, 1, 1),
@@ -1138,7 +1138,7 @@ def test_process_cash_transactions_ibkr_dedupes_overlapping_xml_inputs(tmp_path)
         }
     )
 
-    country_agg_df, etf_df = process_cash_transactions_ibkr(
+    country_agg_df, etf_df, _ = process_cash_transactions_ibkr(
         xml_file_path=[str(first_xml), str(second_xml)],
         exchange_rates_df=rates_df,
         start_date=date(2024, 1, 1),

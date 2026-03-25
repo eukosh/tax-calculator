@@ -18,6 +18,7 @@ from src.finanzonline import (
     BUCKET_WITHHELD_FOREIGN_TAX_EUR_COL,
     ETF_DISTRIBUTION_BUCKET_CATEGORY,
     ORDINARY_INCOME_BUCKET_CATEGORY,
+    REIT_DISTRIBUTION_BUCKET_CATEGORY,
     empty_finanzonline_bucket_df,
 )
 from src.moving_average import (
@@ -45,7 +46,7 @@ IBKR_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 AUTHORITATIVE_STOCK_LIKE_SUBCATEGORIES = {"COMMON", "ADR", "REIT"}
 
 
-SummarySectionName = Literal["dividends", "bonds", "etf_dividends", "trades"]
+SummarySectionName = Literal["dividends", "bonds", "etf_dividends", "reit_dividends", "trades"]
 
 
 @dataclass(frozen=True)
@@ -238,6 +239,8 @@ def build_finanzonline_dividend_buckets_ibkr(
         ).alias(BUCKET_LABEL_COL),
         pl.when(pl.col("sub_category") == "ETF")
         .then(pl.lit(ETF_DISTRIBUTION_BUCKET_CATEGORY))
+        .when(pl.col("sub_category") == "REIT")
+        .then(pl.lit(REIT_DISTRIBUTION_BUCKET_CATEGORY))
         .otherwise(pl.lit(ORDINARY_INCOME_BUCKET_CATEGORY))
         .alias(BUCKET_CATEGORY_COL),
         pl.col("dividends_euro").alias(BUCKET_AMOUNT_EUR_COL),
@@ -544,8 +547,9 @@ def process_cash_transactions_ibkr(
     start_date: date,
     end_date: date,
     extract_etf: bool = False,
+    extract_reit: bool = False,
     excluded_cash_transaction_subcategories: set[str] | None = None,
-) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
+) -> tuple[pl.DataFrame | None, pl.DataFrame | None, pl.DataFrame | None]:
     """
     1. Load IBKR cash transactions from XML and normalize key columns/types.
     2. Filter by settle date and collapse adjustment records by action/type group.
@@ -565,7 +569,7 @@ def process_cash_transactions_ibkr(
         excluded_cash_transaction_subcategories=excluded_cash_transaction_subcategories,
     )
     if pivoted_df is None or pivoted_df.is_empty():
-        return None, None
+        return None, None, None
 
     etf_agg_df = None
     if extract_etf:
@@ -576,10 +580,19 @@ def process_cash_transactions_ibkr(
             etf_agg_df = agg_final_transactions(etf_df)
             logging.info("Dividends from ETFs:\n{}".format(etf_agg_df))
 
+    reit_agg_df = None
+    if extract_reit:
+        reit_df = pivoted_df.filter(pl.col("sub_category") == "REIT")
+        if has_rows(reit_df):
+            pivoted_df = pivoted_df.filter(pl.col("sub_category") != "REIT")
+
+            reit_agg_df = agg_final_transactions(reit_df)
+            logging.info("Dividends from REITs:\n{}".format(reit_agg_df))
+
     country_agg_df = agg_final_transactions(pivoted_df) if has_rows(pivoted_df) else None
     logging.info("Dividends by Country:\n{}".format(country_agg_df))
 
-    return country_agg_df, etf_agg_df
+    return country_agg_df, etf_agg_df, reit_agg_df
 
 
 def process_bonds_ibkr(
@@ -773,6 +786,12 @@ def calculate_summary_ibkr(
         },
         "etf_dividends": {
             "label": "ETF div",
+            "profit_euro_col": "dividends_euro_total",
+            "profit_euro_net_col": "dividends_euro_net_total",
+            "withholding_col": "withholding_tax_euro_total",
+        },
+        "reit_dividends": {
+            "label": "REIT div",
             "profit_euro_col": "dividends_euro_total",
             "profit_euro_net_col": "dividends_euro_net_total",
             "withholding_col": "withholding_tax_euro_total",

@@ -34,8 +34,8 @@ logging.basicConfig(
     format="%(levelname)s: %(message)s\n",
 )
 
-person = "oryna"
-# person = "eugene"
+# person = "oryna"
+person = "eugene"
 # IBKR tax XML input can be:
 # - one XML file
 # - a wildcard string
@@ -154,11 +154,12 @@ if __name__ == "__main__":
         ibkr_trade_history_path=ibkr_trade_history_path,
         authoritative_start_date=authoritative_start_date,
     )
-    dividends_country_agg_df, _ = process_cash_transactions_ibkr(
+    dividends_country_agg_df, _, reit_dividends_country_agg_df = process_cash_transactions_ibkr(
         xml_file_path=ibkr_input_path,
         exchange_rates_df=rates_df,
         start_date=reporting_start_date,
         end_date=reporting_end_date,
+        extract_reit=True,
         excluded_cash_transaction_subcategories={"ETF"},
     )
 
@@ -176,6 +177,8 @@ if __name__ == "__main__":
         ibkr_writer.write_csv(dividends_country_agg_df, "dividends_country_agg.csv")
     if has_rows(bonds_tax_df):
         ibkr_writer.write_csv(bonds_tax_df, "bonds_tax_df.csv")
+    if has_rows(reit_dividends_country_agg_df):
+        ibkr_writer.write_csv(reit_dividends_country_agg_df, "reit_dividends_country_agg.csv")
     if has_rows(bonds_tax_country_agg_df):
         ibkr_writer.write_csv(bonds_tax_country_agg_df, "bonds_tax_country_agg_df.csv")
     if has_rows(stock_sales_df):
@@ -189,6 +192,7 @@ if __name__ == "__main__":
         IbkrSummarySection(name, df)
         for name, df in [
             ("dividends", dividends_country_agg_df),
+            ("reit_dividends", reit_dividends_country_agg_df),
             ("bonds", bonds_tax_country_agg_df),
             ("trades", trades_summary_df),
         ]
