@@ -22,7 +22,8 @@ For IBKR REITs, the workflow:
 1. Loads opening lots from the Austrian opening-state CSV (FMV reset on move-in)
 2. Applies post-opening REIT trades from IBKR trade-history XML
 3. Calculates the year-end deemed-income step-up for positions still held
-4. Simulates planned sales from a manual sale-plan CSV (if provided)
+4. Freezes that stepped-up year-end ledger
+5. Simulates later planned sales only from a manual sale-plan CSV
 
 Important tax treatment used here:
 - the deemed-income basis increase uses the **gross** deemed amount in EUR
@@ -31,6 +32,7 @@ Important tax treatment used here:
 
 Operating rule:
 - keep the input Freedom statement frozen for this workflow; when you later sell, add the actual sale manually to the sale-plan CSV instead of replacing the statement with a newer one
+- for IBKR REITs, use the same rule in practice: keep the post-year-end exit out of the input trade-history set used for this workflow, and enter the actual exit manually in the sale-plan CSV
 
 ## Files You Need
 
@@ -71,9 +73,12 @@ Current file is only a starting point.
 
 ### 3. Optional sale plan
 
-Default path for `eugene`:
+Default paths for `eugene`:
 
-[`data/input/eugene/2025/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv`](../../data/input/eugene/2025/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv)
+- Freedom ETFs:
+  [`data/input/eugene/2025/non_reporting_funds_exit/freedom_exit_sales.csv`](../../data/input/eugene/2025/non_reporting_funds_exit/freedom_exit_sales.csv)
+- IBKR REITs:
+  [`data/input/eugene/2025/non_reporting_funds_exit/ibkr_exit_sales.csv`](../../data/input/eugene/2025/non_reporting_funds_exit/ibkr_exit_sales.csv)
 
 Columns:
 
@@ -110,7 +115,7 @@ poetry run python -m scripts.non_reporting_funds_exit.cli \
   --source freedom \
   --statement-path "data/input/eugene/2025/non_reporting_funds_exit/freedom_2024-03-26 23_59_59_2026-03-17 23_59_59_all.json" \
   --price-input-path "data/input/non_reporting_funds_exit/non_reporting_funds_2025_prices.csv" \
-  --sale-plan-path "data/input/eugene/2025/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv"
+  --sale-plan-path "data/input/eugene/2025/non_reporting_funds_exit/freedom_exit_sales.csv"
 ```
 
 ### IBKR REITs
@@ -123,6 +128,14 @@ This uses:
 - the Austrian opening-state CSV for initial REIT lots
 - the IBKR trade-history XML for post-opening buys/sells
 - the shared annual price file for deemed-income calculation
+
+For `2026+`, the default IBKR path will prefer the prior
+[`ibkr_reit_working_ledger.csv`](../../data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_working_ledger.csv)
+if it exists, so the previous year's AgE step-up is carried into the next year's exit basis.
+
+By default, post-year-end trades from IBKR history are ignored for sale simulation. The intended model is the same as for the ETF workflow:
+- calculate AgE and the stepped-up ledger at year-end
+- later enter the actual exit manually in `ibkr_exit_sales.csv`
 
 Output goes to `data/output/<person>/non_reporting_funds_exit/ibkr/`.
 
@@ -190,18 +203,30 @@ Short human-readable summary of:
 2. Replace the placeholder prices with your final verified prices
 3. Run the CLI
 4. Review:
-   - [`non_reporting_funds_2025_calc.csv`](../../data/output/eugene/non_reporting_funds_exit/non_reporting_funds_2025_calc.csv) under your selected person's output folder
-   - [`non_reporting_funds_2025_basis_adjustments.csv`](../../data/output/eugene/non_reporting_funds_exit/non_reporting_funds_2025_basis_adjustments.csv) under your selected person's output folder
-   - [`non_reporting_funds_working_ledger.csv`](../../data/output/eugene/non_reporting_funds_exit/non_reporting_funds_working_ledger.csv) under your selected person's output folder
+   - Freedom:
+     [`non_reporting_funds_2025_calc.csv`](../../data/output/eugene/non_reporting_funds_exit/freedom/non_reporting_funds_2025_calc.csv),
+     [`non_reporting_funds_2025_basis_adjustments.csv`](../../data/output/eugene/non_reporting_funds_exit/freedom/non_reporting_funds_2025_basis_adjustments.csv),
+     [`non_reporting_funds_working_ledger.csv`](../../data/output/eugene/non_reporting_funds_exit/freedom/non_reporting_funds_working_ledger.csv)
+   - IBKR REITs:
+     [`ibkr_reit_2025_calc.csv`](../../data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_2025_calc.csv),
+     [`ibkr_reit_2025_basis_adjustments.csv`](../../data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_2025_basis_adjustments.csv),
+     [`ibkr_reit_working_ledger.csv`](../../data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_working_ledger.csv)
 
 ### For later sale work
 
-1. Fill [`non_reporting_funds_exit_sales.csv`](../../data/input/eugene/2025/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv)
+1. Fill the source-specific sale plan:
+   - Freedom: [`freedom_exit_sales.csv`](../../data/input/eugene/2025/non_reporting_funds_exit/freedom_exit_sales.csv)
+   - IBKR REITs: [`ibkr_exit_sales.csv`](../../data/input/eugene/2025/non_reporting_funds_exit/ibkr_exit_sales.csv)
 2. Run the CLI again
 3. Review:
-   - [`non_reporting_funds_exit_sales.csv`](../../data/output/eugene/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv) under your selected person's output folder
-   - [`non_reporting_funds_working_ledger.csv`](../../data/output/eugene/non_reporting_funds_exit/non_reporting_funds_working_ledger.csv) under your selected person's output folder
-   - [`non_reporting_funds_exit_summary.md`](../../data/output/eugene/non_reporting_funds_exit/non_reporting_funds_exit_summary.md) under your selected person's output folder
+   - Freedom:
+     [`non_reporting_funds_exit_sales.csv`](../../data/output/eugene/non_reporting_funds_exit/freedom/non_reporting_funds_exit_sales.csv),
+     [`non_reporting_funds_working_ledger.csv`](../../data/output/eugene/non_reporting_funds_exit/freedom/non_reporting_funds_working_ledger.csv),
+     [`non_reporting_funds_exit_summary.md`](../../data/output/eugene/non_reporting_funds_exit/freedom/non_reporting_funds_exit_summary.md)
+   - IBKR REITs:
+     [`ibkr_reit_exit_sales.csv`](../../data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_exit_sales.csv),
+     [`ibkr_reit_working_ledger.csv`](../../data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_working_ledger.csv),
+     [`ibkr_reit_exit_summary.md`](../../data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_exit_summary.md)
 
 ## How This Connects To The Core App
 
@@ -231,7 +256,9 @@ If those are wrong, stop and inspect the inputs before relying on the outputs.
 
 For the non-reporting-fund lump-sum result from this script:
 
-- take the `deemed_amount_eur` total from [`non_reporting_funds_2025_calc.csv`](../../data/output/eugene/non_reporting_funds_exit/non_reporting_funds_2025_calc.csv)
+- take the `deemed_amount_eur` total from the source-specific calc file:
+  - Freedom: [`non_reporting_funds_2025_calc.csv`](../../data/output/eugene/non_reporting_funds_exit/freedom/non_reporting_funds_2025_calc.csv)
+  - IBKR REITs: [`ibkr_reit_2025_calc.csv`](../../data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_2025_calc.csv)
 - enter that amount in `E1kv` under Kennzahl `937`
 
 Meaning of Kennzahl `937`:

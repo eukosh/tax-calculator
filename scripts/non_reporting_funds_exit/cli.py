@@ -63,9 +63,13 @@ def resolve_output_dir(person: str, source: str, explicit_path: str | None) -> s
     return f"data/output/{person}/non_reporting_funds_exit/{source}"
 
 
-def resolve_opening_state_path(person: str, explicit_path: str | None) -> str:
+def resolve_opening_state_path(person: str, tax_year: int, explicit_path: str | None) -> str:
     if explicit_path:
         return explicit_path
+    if tax_year >= 2026:
+        carryforward_ledger_path = f"data/output/{person}/non_reporting_funds_exit/ibkr/ibkr_reit_working_ledger.csv"
+        if Path(carryforward_ledger_path).exists():
+            return carryforward_ledger_path
     return f"data/input/{person}/ibkr/austrian_opening_state_2024-05-01.csv"
 
 
@@ -82,7 +86,7 @@ def main() -> None:
     output_dir = resolve_output_dir(args.person, args.source, args.output_dir)
 
     if args.source == "ibkr":
-        opening_state_path = resolve_opening_state_path(args.person, args.opening_state_path)
+        opening_state_path = resolve_opening_state_path(args.person, args.tax_year, args.opening_state_path)
         trade_history_path = resolve_trade_history_path(args.person, args.trade_history_path)
         output_paths = run_ibkr_reit_workflow(
             opening_state_path=opening_state_path,

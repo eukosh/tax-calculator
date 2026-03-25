@@ -3,6 +3,7 @@ from pathlib import Path
 
 import polars as pl
 
+from scripts.non_reporting_funds_exit.cli import resolve_opening_state_path
 from scripts.non_reporting_funds_exit.ibkr_lots import load_ibkr_reit_trades, load_opening_lots
 from scripts.non_reporting_funds_exit.workflow import run_ibkr_reit_workflow
 
@@ -65,6 +66,21 @@ def _write_price_input(path: Path, rows: list[str] | None = None) -> None:
     )
 
 
+def _write_rates_csv(path: Path, rows: list[tuple[str, str, str]]) -> None:
+    header = (
+        "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE,OBS_STATUS,OBS_CONF,"
+        "OBS_PRE_BREAK,OBS_COM,TIME_FORMAT,BREAKS,COLLECTION,COMPILING_ORG,DISS_ORG,DOM_SER_IDS,PUBL_ECB,"
+        "PUBL_MU,PUBL_PUBLIC,UNIT_INDEX_BASE,COMPILATION,COVERAGE,DECIMALS,NAT_TITLE,SOURCE_AGENCY,SOURCE_PUB,"
+        "TITLE,TITLE_COMPL,UNIT,UNIT_MULT"
+    )
+    lines = [header]
+    for rate_date, currency, rate in rows:
+        lines.append(
+            f"EXR.D.{currency}.EUR.SP00.A,D,{currency},EUR,SP00,A,{rate_date},{rate},A,F,,,P1D,,A,,,,,,,99Q1=100,,,5,,4F0,,x,x,{currency},0"
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
 def test_load_opening_lots_filters_reits_and_sets_eur_basis(tmp_path):
     csv_path = tmp_path / "opening.csv"
     _write_opening_state_csv(csv_path)
@@ -121,6 +137,31 @@ def test_load_ibkr_reit_trades_converts_and_filters(tmp_path):
     all_trades = load_ibkr_reit_trades(xml_path, after_date=None)
     assert len(all_trades) == 2
     assert all(t.ticker == "O" for t in all_trades)
+
+
+def test_load_opening_lots_supports_prior_working_ledger(tmp_path):
+    ledger_path = tmp_path / "ibkr_reit_working_ledger.csv"
+    ledger_path.write_text(
+        "\n".join(
+            [
+                "ticker,isin,lot_id,buy_date,original_quantity,remaining_quantity,trade_currency,buy_price_ccy,buy_commission_ccy,total_cost_ccy,buy_fx,original_cost_eur,cumulative_stepup_eur,adjusted_basis_eur,status,source_trade_id,source_statement_file,last_adjustment_year,last_adjustment_type,last_adjustment_amount_eur,notes",
+                "O,US7561091049,O:opening:2024-05-01,2024-05-01,21.0,21.0,USD,0.0,0.0,0.0,0.0,1056.465719,100.746383,1157.212102,open,,seed.csv,2025,deemed_income_stepup,100.746383,carryforward me",
+                "CTRE,US14174T1079,CTRE:opening:2024-05-01,2024-05-01,15.0,0.0,USD,0.0,0.0,0.0,0.0,0.0,0.0,0.0,closed,,seed.csv,,,0.0,ignore me",
+            ]
+        )
+        + "\n"
+    )
+
+    lots = load_opening_lots(ledger_path, target_tickers=("O", "CTRE"))
+
+    assert len(lots) == 1
+    lot = lots[0]
+    assert lot.ticker == "O"
+    assert lot.remaining_quantity == 21.0
+    assert lot.original_quantity == 21.0
+    assert lot.original_cost_eur == 1056.465719
+    assert lot.cumulative_stepup_eur == 100.746383
+    assert lot.last_adjustment_year == "2025"
 
 
 def test_ibkr_reit_workflow_calculates_age_and_adjusts_basis(tmp_path):
@@ -197,6 +238,71 @@ def test_ibkr_reit_workflow_calculates_age_and_adjusts_basis(tmp_path):
     assert "IBKR REIT" in summary_text
 
 
+def test_ibkr_reit_workflow_carries_prior_year_stepup_from_working_ledger(tmp_path):
+    rates_path = tmp_path / "rates.csv"
+    _write_rates_csv(
+        rates_path,
+        [
+            ("2024-05-01", "USD", "1"),
+            ("2024-05-01", "GBP", "1"),
+            ("2025-12-31", "USD", "1"),
+            ("2025-12-31", "GBP", "1"),
+            ("2026-12-31", "USD", "1"),
+            ("2026-12-31", "GBP", "1"),
+        ],
+    )
+    opening_csv = tmp_path / "opening.csv"
+    opening_csv.write_text(
+        "\n".join(
+            [
+                "snapshot_date,broker,ticker,isin,currency,asset_class,quantity,base_cost_total_eur,basis_adjustment_total_eur,total_basis_eur,average_basis_eur,status,last_event_date,basis_method,notes,source_file",
+                '2024-05-01,ibkr,O,US7561091049,USD,REIT,10.0,100.0,0.0,100.0,10.0,open,2024-05-01,move_in_fmv_reset,"Opening REIT position",some.xml',
+            ]
+        )
+        + "\n"
+    )
+    xml_path = tmp_path / "trades.xml"
+    _write_trade_history_xml(xml_path, [])
+    price_csv = tmp_path / "prices.csv"
+    _write_price_input(
+        price_csv,
+        rows=[
+            "2025,O,US7561091049,USD,10,20,test 2025",
+            "2026,O,US7561091049,USD,20,20,test 2026",
+        ],
+    )
+
+    output_2025 = tmp_path / "output_2025"
+    output_2026 = tmp_path / "output_2026"
+
+    first_run_paths = run_ibkr_reit_workflow(
+        opening_state_path=str(opening_csv),
+        ibkr_trade_history_path=str(xml_path),
+        price_input_path=str(price_csv),
+        output_dir=str(output_2025),
+        tax_year=2025,
+        raw_exchange_rates_path=str(rates_path),
+        target_tickers=("O",),
+    )
+    second_run_paths = run_ibkr_reit_workflow(
+        opening_state_path=str(first_run_paths["working_ledger"]),
+        ibkr_trade_history_path=str(xml_path),
+        price_input_path=str(price_csv),
+        output_dir=str(output_2026),
+        tax_year=2026,
+        raw_exchange_rates_path=str(rates_path),
+        target_tickers=("O",),
+    )
+
+    ledger_2025 = pl.read_csv(first_run_paths["working_ledger"])
+    ledger_2026 = pl.read_csv(second_run_paths["working_ledger"])
+    calc_2026 = pl.read_csv(second_run_paths["calc"])
+
+    assert ledger_2025["adjusted_basis_eur"].sum() == 190.0
+    assert calc_2026["deemed_amount_eur"].sum() == 20.0
+    assert ledger_2026["adjusted_basis_eur"].sum() == 210.0
+
+
 def test_ibkr_reit_workflow_with_sale_simulation(tmp_path):
     opening_csv = tmp_path / "opening.csv"
     _write_opening_state_csv(opening_csv)
@@ -238,3 +344,61 @@ def test_ibkr_reit_workflow_with_sale_simulation(tmp_path):
 
     # Informational CCY fields are 0 for opening lots (FMV reset, no actual trade)
     assert sales_df["informational_buy_cost_ccy_excl_fees"].item() == 0.0
+
+
+def test_ibkr_reit_workflow_ignores_post_year_end_trade_history_for_manual_exit_mode(tmp_path):
+    opening_csv = tmp_path / "opening.csv"
+    _write_opening_state_csv(opening_csv)
+
+    xml_path = tmp_path / "trades.xml"
+    _write_trade_history_xml(
+        xml_path,
+        [
+            _trade_confirm_row(
+                ticker="O", isin="US7561091049", sub_category="REIT",
+                trade_date="2026-03-15", date_time="2026-03-15 10:00:00",
+                operation="SELL", quantity="-21", price="60.00", trade_id="o-real-sale",
+            ),
+        ],
+    )
+
+    price_csv = tmp_path / "prices.csv"
+    _write_price_input(price_csv)
+
+    sale_plan = tmp_path / "sales.csv"
+    sale_plan.write_text(
+        "ticker,sale_date,quantity,sale_price_ccy\n"
+        "O,2026-03-15,21,60.00\n"
+    )
+
+    output_dir = tmp_path / "output"
+
+    output_paths = run_ibkr_reit_workflow(
+        opening_state_path=str(opening_csv),
+        ibkr_trade_history_path=str(xml_path),
+        price_input_path=str(price_csv),
+        sale_plan_path=str(sale_plan),
+        output_dir=str(output_dir),
+        raw_exchange_rates_path=str(RAW_RATES_PATH),
+        target_tickers=("O",),
+    )
+
+    sales_df = pl.read_csv(output_paths["sales"])
+    ledger_df = pl.read_csv(output_paths["working_ledger"])
+
+    assert sales_df.height == 1
+    assert sales_df["ticker"].item() == "O"
+    assert sales_df["quantity_from_lot"].item() == 21.0
+    assert ledger_df["remaining_quantity"].sum() == 21.0
+
+
+def test_resolve_opening_state_path_prefers_reit_working_ledger_for_2026(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ledger_dir = tmp_path / "data" / "output" / "eugene" / "non_reporting_funds_exit" / "ibkr"
+    ledger_dir.mkdir(parents=True)
+    ledger_path = ledger_dir / "ibkr_reit_working_ledger.csv"
+    ledger_path.write_text("ticker,isin,lot_id,buy_date,original_quantity,remaining_quantity,trade_currency,buy_price_ccy,buy_commission_ccy,total_cost_ccy,buy_fx,original_cost_eur,cumulative_stepup_eur,adjusted_basis_eur,status,source_trade_id,source_statement_file,last_adjustment_year,last_adjustment_type,last_adjustment_amount_eur,notes\n")
+
+    resolved = resolve_opening_state_path("eugene", 2026, None)
+
+    assert resolved == "data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_working_ledger.csv"

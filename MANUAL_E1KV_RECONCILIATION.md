@@ -122,11 +122,12 @@ After you add reporting-funds or non-reporting-funds income, the combined base m
 
 From the core PDF:
 
-- ordinary capital income: `840.1220`
+- ordinary capital income: `707.0305`
 - trade profit: `15.4604`
 - trade loss: `-1350.8942`
 - ETF distributions: `291.7672`
-- source-level creditable foreign tax: `121.9311`
+- REIT distributions: `133.0915`
+- source-level creditable foreign tax: `121.9313`
 
 From reporting funds:
 
@@ -146,17 +147,17 @@ From non-reporting funds (REITs):
 
 ### Example Totals
 
-- ordinary capital income = `840.1220`
+- ordinary capital income = `707.0305`
 - trade profit = `15.4604`
 - trade loss = `-1350.8942`
-- ETF/REIT distributions = `291.7672 + 0 + 21.453814 = 313.221014`
+- ETF/REIT distributions = `291.7672 + 133.0915 + 21.453814 = 446.312514`
 - AGE = `62.424798 + 1089.5114 + 300.4264 = 1452.362598`
 - domestic dividends (`KZ 189`) = `0`
 - Austrian KESt on domestic dividends (`KZ 899`) = `0`
 
 Positive total:
 
-- `840.1220 + 15.4604 + 313.221014 + 1452.362598 + 0 = 2621.166012`
+- `707.0305 + 15.4604 + 446.312514 + 1452.362598 + 0 = 2621.166012`
 
 Post-loss base:
 
@@ -168,16 +169,16 @@ Foreign-tax ceiling:
 
 Source-level creditable foreign tax:
 
-- `121.9311 + 6.0168 = 127.9479`
+- `121.9313 + 6.0168 = 127.9481`
 
 Final usable foreign-tax credit:
 
-- `min(127.9479, 349.3247) = 127.9479`
+- `min(127.9481, 349.3247) = 127.9481`
 
 ### Example Filing Note
 
 ```md
-##### Einkünfte aus der Überlassung von Kapital (§ 27 Abs. 2; insbesondere Dividenden, Zinserträge aus Wertpapieren 27,5%) = 840.12
+##### Einkünfte aus der Überlassung von Kapital (§ 27 Abs. 2; insbesondere Dividenden, Zinserträge aus Wertpapieren 27,5%) = 707.03
 
 ##### Einkünfte aus realisierten Wertsteigerungen von Kapitalvermögen (§ 27 Abs. 3; insbesondere Veräußerungsgewinne aus Aktien,
 Forderungswertpapieren und Fondsanteilen)
@@ -187,13 +188,13 @@ Verluste = -1350.89
 
 
 ##### Einkünfte aus Investmentfonds und Immobilieninvestmentfonds
-Ausschüttungen 27,5% = 291.7672 + 0 + 21.453814 = 313.22
+Ausschüttungen 27,5% = 291.7672 + 133.0915 + 21.453814 = 446.31
 Ausschüttungsgleiche Erträge 27,5% = 62.424798 + 1089.5114 + 300.4264 = 1452.36
 Inländische Dividenden im Verlustausgleich (KZ 189) = 0.00
 KESt auf inländische Dividenden (KZ 899) = 0.00
 
 #### Anzurechnende ausländische
-(Quellen) Steuer auf Einkünfte, die dem besonderen Steuersatz von 27,5% unterliegen = min(121.9311 + 6.016800, 349.3247) = 127.95
+(Quellen) Steuer auf Einkünfte, die dem besonderen Steuersatz von 27,5% unterliegen = min(121.9313 + 6.016800, 349.3247) = 127.95
 ```
 
 ## Audit Support

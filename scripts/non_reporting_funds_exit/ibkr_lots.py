@@ -12,20 +12,12 @@ from src.broker_history import load_ibkr_stock_like_trades
 IBKR_REIT_TICKERS = ("CHCT", "CTRE", "MPW", "O")
 
 
-def load_opening_lots(
-    opening_state_path: str | Path,
-    target_tickers: tuple[str, ...] = IBKR_REIT_TICKERS,
-    asset_class_filter: str = "REIT",
+def _load_lots_from_opening_state_rows(
+    rows: list[dict[str, str]],
+    *,
+    target_tickers: tuple[str, ...],
+    asset_class_filter: str,
 ) -> list[Lot]:
-    """Load REIT lots from the IBKR Austrian opening state CSV.
-
-    Each matching row becomes one Lot. The EUR basis from the CSV is authoritative
-    (FMV reset on Austrian move-in date). CCY fields are set to zero because
-    there was no actual trade on the snapshot date.
-    """
-    with Path(opening_state_path).open() as handle:
-        rows = list(csv.DictReader(handle))
-
     lots: list[Lot] = []
     for row in rows:
         ticker = row["ticker"].strip()
@@ -54,6 +46,82 @@ def load_opening_lots(
                 source_statement_file=row.get("source_file", "").strip(),
                 notes=row.get("notes", "").strip() or f"FMV reset opening lot as of {snapshot_date.isoformat()}",
             )
+        )
+    return lots
+
+
+def _load_lots_from_working_ledger_rows(
+    rows: list[dict[str, str]],
+    *,
+    target_tickers: tuple[str, ...],
+) -> list[Lot]:
+    lots: list[Lot] = []
+    for row in rows:
+        ticker = row["ticker"].strip()
+        if ticker not in target_tickers:
+            continue
+
+        remaining_quantity = float(row["remaining_quantity"])
+        if remaining_quantity <= 0:
+            continue
+
+        buy_date = datetime.strptime(row["buy_date"].strip(), "%Y-%m-%d").date()
+        lots.append(
+            Lot(
+                ticker=ticker,
+                isin=row["isin"].strip(),
+                lot_id=row["lot_id"].strip(),
+                buy_date=buy_date,
+                # Carry forward the unsold fraction as the new opening lot.
+                original_quantity=round_qty(remaining_quantity),
+                remaining_quantity=round_qty(remaining_quantity),
+                trade_currency=row["trade_currency"].strip(),
+                buy_price_ccy=round_money(float(row["buy_price_ccy"])),
+                buy_commission_ccy=round_money(float(row["buy_commission_ccy"])),
+                total_cost_ccy=round_money(float(row["total_cost_ccy"])),
+                buy_fx=round_money(float(row["buy_fx"])),
+                original_cost_eur=round_money(float(row["original_cost_eur"])),
+                cumulative_stepup_eur=round_money(float(row.get("cumulative_stepup_eur") or 0.0)),
+                status="open",
+                source_trade_id=row.get("source_trade_id", "").strip(),
+                source_statement_file=row.get("source_statement_file", "").strip(),
+                notes=row.get("notes", "").strip(),
+                last_adjustment_year=row.get("last_adjustment_year", "").strip(),
+                last_adjustment_type=row.get("last_adjustment_type", "").strip(),
+                last_adjustment_amount_eur=round_money(float(row.get("last_adjustment_amount_eur") or 0.0)),
+            )
+        )
+    return lots
+
+
+def load_opening_lots(
+    opening_state_path: str | Path,
+    target_tickers: tuple[str, ...] = IBKR_REIT_TICKERS,
+    asset_class_filter: str = "REIT",
+) -> list[Lot]:
+    """Load REIT lots from the IBKR Austrian opening state CSV.
+
+    Supported inputs:
+    - Austrian opening-state CSV (move-in FMV reset)
+    - prior `ibkr_reit_working_ledger.csv` for year-over-year carryforward
+    """
+    with Path(opening_state_path).open() as handle:
+        rows = list(csv.DictReader(handle))
+
+    if not rows:
+        return []
+
+    row_keys = set(rows[0].keys())
+    if {"snapshot_date", "asset_class", "quantity", "total_basis_eur"}.issubset(row_keys):
+        lots = _load_lots_from_opening_state_rows(
+            rows, target_tickers=target_tickers, asset_class_filter=asset_class_filter,
+        )
+    elif {"lot_id", "buy_date", "remaining_quantity", "original_cost_eur", "cumulative_stepup_eur"}.issubset(row_keys):
+        lots = _load_lots_from_working_ledger_rows(rows, target_tickers=target_tickers)
+    else:
+        raise ValueError(
+            f"Unsupported opening-lots schema at {opening_state_path}. "
+            "Expected Austrian opening state CSV or prior ibkr_reit_working_ledger.csv"
         )
 
     return sorted(lots, key=lambda lot: (lot.ticker, lot.lot_id))

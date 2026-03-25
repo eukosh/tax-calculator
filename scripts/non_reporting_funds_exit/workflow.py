@@ -581,6 +581,7 @@ def run_ibkr_reit_workflow(
     sale_plan_path: str | Path | None = None,
     raw_exchange_rates_path: str | Path = "data/input/currencies/raw_exchange_rates.csv",
     target_tickers: tuple[str, ...] | None = None,
+    include_post_year_end_trades: bool = False,
 ) -> dict[str, Path]:
     """Non-reporting funds (Nicht-Meldefonds) workflow for IBKR REITs.
 
@@ -590,8 +591,9 @@ def run_ibkr_reit_workflow(
     4. Apply trades to opening lots up to year-end to get year-end position.
     5. Calculate AgE (deemed income) per ticker using max(0.9*(last-first), 0.1*last) formula.
     6. Allocate step-up to open lots and adjust their EUR cost basis.
-    7. Continue lot history with post-year-end trades and carry step-ups forward.
-    8. Simulate planned sales from manual CSV (if provided) using adjusted basis.
+    7. By default, freeze the year-end stepped-up ledger and simulate later exits only
+       from the manual sale-plan CSV, mirroring the non-reporting ETF workflow.
+    8. Optionally continue lot history with post-year-end trades if explicitly enabled.
     9. Write output artifacts: working ledger, AgE calc, basis adjustments, sales, summary.
     """
     from scripts.non_reporting_funds_exit.ibkr_lots import IBKR_REIT_TICKERS, load_ibkr_reit_trades, load_opening_lots
@@ -624,11 +626,14 @@ def run_ibkr_reit_workflow(
     year_end_date = date(tax_year, 12, 31)
     calc_rows, adjustment_rows = apply_year_end_stepup(year_end_lots, price_rows, tax_year, year_end_date, fx_table)
 
-    full_lots = process_events_into_lots(
-        deepcopy(year_end_lots), reit_trades, [], fx_table, tax_year,
-        source_label="ibkr", up_to_year_end=False,
-    )
-    full_lots = carry_stepups_forward(year_end_lots, full_lots)
+    if include_post_year_end_trades:
+        full_lots = process_events_into_lots(
+            deepcopy(year_end_lots), reit_trades, [], fx_table, tax_year,
+            source_label="ibkr", up_to_year_end=False,
+        )
+        full_lots = carry_stepups_forward(year_end_lots, full_lots)
+    else:
+        full_lots = deepcopy(year_end_lots)
 
     working_ledger_df = pl.DataFrame(
         [lot.to_record() for lot in sorted(full_lots, key=lambda lot: (lot.ticker, lot.buy_date, lot.lot_id))]
