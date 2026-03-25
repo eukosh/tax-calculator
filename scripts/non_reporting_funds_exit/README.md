@@ -1,20 +1,28 @@
 # Non-Reporting Funds Exit Workflow
 
-This folder contains a standalone workflow for Austrian non-reporting funds held in Freedom Finance.
+This folder contains a standalone workflow for Austrian non-reporting funds (Nicht-Meldefonds).
 
-Current scope:
-- `SCHD.US`
-- `TLT.US`
+Two sources are supported:
+
+- **Freedom Finance ETFs** (`--source freedom`, default): `SCHD.US`, `TLT.US`
+- **IBKR REITs** (`--source ibkr`): `CHCT`, `CTRE`, `MPW`, `O`
 
 It does **not** handle ordinary fund distributions for filing. Those stay in the normal/core tax workflow.
 
 ## What This Script Does
 
-The workflow does 3 things:
+For Freedom ETFs, the workflow:
 
-1. Rebuilds your Freedom buy lots from the lifetime statement
-2. Calculates the `2025-12-31` deemed-income step-up for non-reporting funds
+1. Rebuilds buy lots from the lifetime Freedom statement
+2. Calculates the year-end deemed-income step-up
 3. Simulates later FIFO sales using the adjusted EUR basis
+
+For IBKR REITs, the workflow:
+
+1. Loads opening lots from the Austrian opening-state CSV (FMV reset on move-in)
+2. Applies post-opening REIT trades from IBKR trade-history XML
+3. Calculates the year-end deemed-income step-up for positions still held
+4. Simulates planned sales from a manual sale-plan CSV (if provided)
 
 Important tax treatment used here:
 - the deemed-income basis increase uses the **gross** deemed amount in EUR
@@ -88,47 +96,46 @@ TLT.US,2026-03-17,43,87.21
 
 ## How To Run
 
-The commands below are intended to be copy-pasted and then edited only where your paths or person differ.
-
-From repo root:
+### Freedom ETFs (default)
 
 ```bash
-poetry run python -m scripts.non_reporting_funds_exit.cli
+poetry run python -m scripts.non_reporting_funds_exit.cli --person eugene --source freedom
 ```
 
-This uses:
-- `--person eugene`
-- the shared annual price file
-- the single statement JSON found under `data/input/eugene/2025/non_reporting_funds_exit/`
-- `data/input/eugene/2025/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv`
-- `data/output/eugene/non_reporting_funds_exit`
-
-To run it for another person:
-
-```bash
-poetry run python -m scripts.non_reporting_funds_exit.cli --person oryna
-```
-
-If a person folder contains multiple statement JSON files, pass `--statement-path` explicitly.
-
-You can also pass explicit paths:
+Or with explicit paths:
 
 ```bash
 poetry run python -m scripts.non_reporting_funds_exit.cli \
   --person eugene \
+  --source freedom \
   --statement-path "data/input/eugene/2025/non_reporting_funds_exit/freedom_2024-03-26 23_59_59_2026-03-17 23_59_59_all.json" \
   --price-input-path "data/input/non_reporting_funds_exit/non_reporting_funds_2025_prices.csv" \
-  --sale-plan-path "data/input/eugene/2025/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv" \
-  --output-dir "data/output/eugene/non_reporting_funds_exit"
+  --sale-plan-path "data/input/eugene/2025/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv"
 ```
+
+### IBKR REITs
+
+```bash
+poetry run python -m scripts.non_reporting_funds_exit.cli --person eugene --source ibkr
+```
+
+This uses:
+- the Austrian opening-state CSV for initial REIT lots
+- the IBKR trade-history XML for post-opening buys/sells
+- the shared annual price file for deemed-income calculation
+
+Output goes to `data/output/<person>/non_reporting_funds_exit/ibkr/`.
 
 ## Output Files
 
 Outputs are written to:
 
 ```text
-../../data/output/<person>/non_reporting_funds_exit/
+../../data/output/<person>/non_reporting_funds_exit/freedom/   (Freedom ETFs)
+../../data/output/<person>/non_reporting_funds_exit/ibkr/      (IBKR REITs)
 ```
+
+IBKR output files use the `ibkr_reit_` prefix instead of `non_reporting_funds_`.
 
 ### `non_reporting_funds_working_ledger.csv`
 
@@ -230,7 +237,7 @@ For the non-reporting-fund lump-sum result from this script:
 Meaning of Kennzahl `937`:
 - `ausschüttungsgleiche Erträge aus Fondsanteilen`, when the fund units are held on an `ausländisches Depot` and there is no Austrian KESt withholding agent
 
-For your case, this is the field for the 2025 non-reporting-fund deemed-income amount for `SCHD.US` and `TLT.US`.
+For your case, this is the field for the 2025 non-reporting-fund deemed-income amount for `SCHD.US`, `TLT.US`, and the IBKR REITs (`CTRE`, `O`, etc.).
 
 Important:
 

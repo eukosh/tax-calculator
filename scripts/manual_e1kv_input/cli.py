@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 from scripts.manual_e1kv_input.workflow import (
     CoreInputs,
-    NonReportingFundsInputs,
     ReportingFundsInputs,
     build_e1kv_computation,
     parse_money_input,
@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _prompt_money(label: str) -> object:
+def _prompt_money(label: str) -> Decimal:
     raw_value = input(f"{label} [default 0]: ").strip()
     return parse_money_input(raw_value)
 
@@ -33,6 +33,7 @@ def _prompt_core_inputs() -> CoreInputs:
         trade_profit=_prompt_money("Core trade profit 27.5%"),
         trade_loss=_prompt_money("Core trade loss (enter positive or negative)"),
         fund_distributions=_prompt_money("Core ETF distributions 27.5%"),
+        reit_distributions=_prompt_money("Core REIT distributions 27.5%"),
         creditable_foreign_tax=_prompt_money("Core source-level creditable foreign tax"),
     )
 
@@ -48,17 +49,6 @@ def _prompt_reporting_funds_inputs() -> ReportingFundsInputs:
     )
 
 
-def _prompt_non_reporting_funds_inputs() -> NonReportingFundsInputs:
-    print("\nNon-reporting-funds inputs")
-    return NonReportingFundsInputs(
-        fund_distributions=_prompt_money("Non-reporting-funds ETF distributions 27.5%"),
-        deemed_distributed_income=_prompt_money("Non-reporting-funds AGE 27.5%"),
-        domestic_dividends_kz189=_prompt_money("Non-reporting-funds domestic dividends (KZ 189)"),
-        domestic_dividend_kest_kz899=_prompt_money("Non-reporting-funds Austrian KESt on domestic dividends (KZ 899)"),
-        creditable_foreign_tax=_prompt_money("Non-reporting-funds creditable foreign tax"),
-    )
-
-
 def main() -> None:
     args = build_parser().parse_args()
     default_output_path = Path(f"manual_e1kv_input_{args.tax_year}.md")
@@ -66,18 +56,23 @@ def main() -> None:
 
     core = _prompt_core_inputs()
     reporting_funds = _prompt_reporting_funds_inputs()
-    non_reporting_funds = _prompt_non_reporting_funds_inputs()
+
+    print("\nNon-reporting-funds inputs")
+    non_reporting_etf_age = _prompt_money("Non-reporting ETF AGE 27.5%")
+    non_reporting_reit_age = _prompt_money("Non-reporting REIT AGE 27.5%")
 
     result = build_e1kv_computation(
         core=core,
         reporting_funds=reporting_funds,
-        non_reporting_funds=non_reporting_funds,
+        non_reporting_etf_age=non_reporting_etf_age,
+        non_reporting_reit_age=non_reporting_reit_age,
     )
     output = render_output_markdown(
         tax_year=args.tax_year,
         core=core,
         reporting_funds=reporting_funds,
-        non_reporting_funds=non_reporting_funds,
+        non_reporting_etf_age=non_reporting_etf_age,
+        non_reporting_reit_age=non_reporting_reit_age,
         result=result,
     )
     output_path.write_text(output, encoding="utf-8")

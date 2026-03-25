@@ -2,6 +2,7 @@ from pathlib import Path
 
 import polars as pl
 
+from scripts.non_reporting_funds_exit.freedom_lots import TARGET_TICKERS
 from scripts.non_reporting_funds_exit.workflow import load_price_rows, run_workflow
 
 STATEMENT_PATH = Path(
@@ -50,7 +51,7 @@ def test_load_price_rows_keeps_only_supported_rows_present_for_year(tmp_path):
         + "\n"
     )
 
-    price_rows = load_price_rows(price_input_path, tax_year=2025)
+    price_rows = load_price_rows(price_input_path, tax_year=2025, target_tickers=TARGET_TICKERS)
 
     assert list(price_rows) == ["TLT.US"]
 

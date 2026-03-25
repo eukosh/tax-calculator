@@ -83,14 +83,19 @@ class Lot:
         }
 
 
-def load_price_rows(price_input_path: str | Path, tax_year: int) -> dict[str, dict[str, str]]:
+def load_price_rows(
+    price_input_path: str | Path,
+    tax_year: int,
+    target_tickers: tuple[str, ...] | None = None,
+) -> dict[str, dict[str, str]]:
     with Path(price_input_path).open() as handle:
         rows = [row for row in csv.DictReader(handle) if row.get("ticker")]
 
     filtered_rows = {
         row["ticker"].strip(): row
         for row in rows
-        if int(row["tax_year"]) == tax_year and row["ticker"].strip() in TARGET_TICKERS
+        if int(row["tax_year"]) == tax_year
+        and (target_tickers is None or row["ticker"].strip() in target_tickers)
     }
     if not filtered_rows:
         raise ValueError(f"No supported price rows found for tax year {tax_year}")
@@ -206,14 +211,21 @@ def consume_sell(lots: list[Lot], trade) -> None:
         raise ValueError(f"Sell of {trade.ticker} on {trade.trade_date} exceeds available quantity")
 
 
-def build_lots(
-    statement_path: str | Path,
+def process_events_into_lots(
+    initial_lots: list[Lot],
+    trades: list,
+    split_events: list,
     fx_table: dict[str, tuple[list[date], list[float]]],
     tax_year: int,
-) -> tuple[list[Lot], date]:
-    statement_path = str(statement_path)
-    trades = load_target_trades(statement_path)
-    split_events = load_split_events(statement_path)
+    source_label: str = "",
+    *,
+    up_to_year_end: bool = True,
+) -> list[Lot]:
+    """Process trades and splits against initial lots.
+
+    When up_to_year_end=True, processes events up to year-end cutoff (for building year-end lots).
+    When up_to_year_end=False, processes only events AFTER year-end (for continuing lot history).
+    """
     year_end_cutoff = datetime.combine(date(tax_year, 12, 31), time(23, 59, 59), tzinfo=UTC)
 
     events: list[tuple[datetime, str, object]] = []
@@ -223,18 +235,32 @@ def build_lots(
         events.append((datetime.combine(split_event.event_date, time(23, 0), tzinfo=UTC), "split", split_event))
     events.sort(key=lambda item: item[0])
 
-    lots: list[Lot] = []
+    lots = list(initial_lots)
     for event_dt, event_type, payload in events:
-        if event_dt > year_end_cutoff:
+        if up_to_year_end and event_dt > year_end_cutoff:
             break
+        if not up_to_year_end and event_dt <= year_end_cutoff:
+            continue
         if event_type == "trade":
             if payload.operation == "buy":
-                lots.append(build_buy_lot(payload, fx_table, statement_path))
+                lots.append(build_buy_lot(payload, fx_table, source_label))
             else:
                 consume_sell(lots, payload)
         else:
             apply_split(lots, payload)
 
+    return lots
+
+
+def build_lots(
+    statement_path: str | Path,
+    fx_table: dict[str, tuple[list[date], list[float]]],
+    tax_year: int,
+) -> tuple[list[Lot], date]:
+    statement_path = str(statement_path)
+    trades = load_target_trades(statement_path)
+    split_events = load_split_events(statement_path)
+    lots = process_events_into_lots([], trades, split_events, fx_table, tax_year, source_label=statement_path)
     return lots, date(tax_year, 12, 31)
 
 
@@ -246,28 +272,10 @@ def continue_lot_history(
 ) -> list[Lot]:
     trades = load_target_trades(statement_path)
     split_events = load_split_events(statement_path)
-    year_end_cutoff = datetime.combine(date(tax_year, 12, 31), time(23, 59, 59), tzinfo=UTC)
-
-    events: list[tuple[datetime, str, object]] = []
-    for trade in trades:
-        events.append((trade.trade_datetime.replace(tzinfo=UTC), "trade", trade))
-    for split_event in split_events:
-        events.append((datetime.combine(split_event.event_date, time(23, 0), tzinfo=UTC), "split", split_event))
-    events.sort(key=lambda item: item[0])
-
-    full_lots = deepcopy(lots)
-    for event_dt, event_type, payload in events:
-        if event_dt <= year_end_cutoff:
-            continue
-        if event_type == "trade":
-            if payload.operation == "buy":
-                full_lots.append(build_buy_lot(payload, fx_table, str(statement_path)))
-            else:
-                consume_sell(full_lots, payload)
-        else:
-            apply_split(full_lots, payload)
-
-    return full_lots
+    return process_events_into_lots(
+        deepcopy(lots), trades, split_events, fx_table, tax_year,
+        source_label=str(statement_path), up_to_year_end=False,
+    )
 
 
 def apply_year_end_stepup(
@@ -460,7 +468,12 @@ def write_csv(df: pl.DataFrame, output_path: Path) -> None:
 
 
 def write_summary(
-    summary_path: Path, ledger_df: pl.DataFrame, calc_df: pl.DataFrame, sales_df: pl.DataFrame, tax_year: int
+    summary_path: Path,
+    ledger_df: pl.DataFrame,
+    calc_df: pl.DataFrame,
+    sales_df: pl.DataFrame,
+    tax_year: int,
+    source_label: str = "Non-Reporting Funds",
 ) -> None:
     total_deemed_amount_eur = calc_df["deemed_amount_eur"].sum() if calc_df.height else 0.0
     calc_lines = [
@@ -468,7 +481,8 @@ def write_summary(
         for row in calc_df.to_dicts()
     ]
     ledger_lines = []
-    for ticker in TARGET_TICKERS:
+    tickers = sorted(ledger_df["ticker"].unique().to_list()) if ledger_df.height else []
+    for ticker in tickers:
         ticker_ledger_df = ledger_df.filter(pl.col("ticker") == ticker)
         quantity = ticker_ledger_df["remaining_quantity"].sum() if ticker_ledger_df.height else 0.0
         adjusted_basis = ticker_ledger_df["adjusted_basis_eur"].sum() if ticker_ledger_df.height else 0.0
@@ -485,7 +499,7 @@ def write_summary(
     summary_path.write_text(
         "\n".join(
             [
-                "# Non-Reporting Funds Exit Summary",
+                f"# {source_label} Exit Summary",
                 "",
                 f"## {tax_year} Step-Up",
                 *calc_lines,
@@ -514,7 +528,7 @@ def run_workflow(
     sale_plan_path: str | Path | None = None,
     raw_exchange_rates_path: str | Path = "data/input/currencies/raw_exchange_rates.csv",
 ) -> dict[str, Path]:
-    price_rows = load_price_rows(price_input_path, tax_year)
+    price_rows = load_price_rows(price_input_path, tax_year, target_tickers=TARGET_TICKERS)
     sale_rows = load_sale_rows(sale_plan_path)
 
     all_relevant_dates = [trade.trade_date for trade in load_target_trades(statement_path)]
@@ -548,6 +562,93 @@ def run_workflow(
     write_csv(basis_adjustments_df, basis_path)
     write_csv(sales_df, sales_path)
     write_summary(summary_path, working_ledger_df, calc_df, sales_df, tax_year)
+
+    return {
+        "working_ledger": ledger_path,
+        "calc": calc_path,
+        "basis_adjustments": basis_path,
+        "sales": sales_path,
+        "summary": summary_path,
+    }
+
+
+def run_ibkr_reit_workflow(
+    opening_state_path: str | Path,
+    ibkr_trade_history_path: str | Path,
+    price_input_path: str | Path,
+    output_dir: str | Path,
+    tax_year: int = 2025,
+    sale_plan_path: str | Path | None = None,
+    raw_exchange_rates_path: str | Path = "data/input/currencies/raw_exchange_rates.csv",
+    target_tickers: tuple[str, ...] | None = None,
+) -> dict[str, Path]:
+    """Non-reporting funds (Nicht-Meldefonds) workflow for IBKR REITs.
+
+    1. Load initial REIT lots from the Austrian opening state CSV (FMV reset on move-in date).
+    2. Load post-opening REIT trades from IBKR trade history XML (buys and sells after snapshot).
+    3. Build FX table covering all relevant dates from ECB rates.
+    4. Apply trades to opening lots up to year-end to get year-end position.
+    5. Calculate AgE (deemed income) per ticker using max(0.9*(last-first), 0.1*last) formula.
+    6. Allocate step-up to open lots and adjust their EUR cost basis.
+    7. Continue lot history with post-year-end trades and carry step-ups forward.
+    8. Simulate planned sales from manual CSV (if provided) using adjusted basis.
+    9. Write output artifacts: working ledger, AgE calc, basis adjustments, sales, summary.
+    """
+    from scripts.non_reporting_funds_exit.ibkr_lots import IBKR_REIT_TICKERS, load_ibkr_reit_trades, load_opening_lots
+
+    if target_tickers is None:
+        target_tickers = IBKR_REIT_TICKERS
+
+    opening_lots = load_opening_lots(opening_state_path, target_tickers=target_tickers)
+    if not opening_lots:
+        raise ValueError(f"No REIT lots found in opening state: {opening_state_path}")
+
+    snapshot_date = opening_lots[0].buy_date
+    reit_trades = load_ibkr_reit_trades(
+        ibkr_trade_history_path, target_tickers=target_tickers, after_date=snapshot_date,
+    )
+
+    price_rows = load_price_rows(price_input_path, tax_year, target_tickers=target_tickers)
+    sale_rows = load_sale_rows(sale_plan_path)
+
+    all_relevant_dates: list[date] = [snapshot_date, date(tax_year, 12, 31)]
+    all_relevant_dates.extend(trade.trade_date for trade in reit_trades)
+    all_relevant_dates.extend(
+        datetime.strptime(row["sale_date"], "%Y-%m-%d").date() for row in sale_rows if row.get("sale_date")
+    )
+    fx_table = build_fx_table(min(all_relevant_dates), max(all_relevant_dates), raw_exchange_rates_path)
+
+    year_end_lots = process_events_into_lots(
+        opening_lots, reit_trades, [], fx_table, tax_year, source_label="ibkr",
+    )
+    year_end_date = date(tax_year, 12, 31)
+    calc_rows, adjustment_rows = apply_year_end_stepup(year_end_lots, price_rows, tax_year, year_end_date, fx_table)
+
+    full_lots = process_events_into_lots(
+        deepcopy(year_end_lots), reit_trades, [], fx_table, tax_year,
+        source_label="ibkr", up_to_year_end=False,
+    )
+    full_lots = carry_stepups_forward(year_end_lots, full_lots)
+
+    working_ledger_df = pl.DataFrame(
+        [lot.to_record() for lot in sorted(full_lots, key=lambda lot: (lot.ticker, lot.buy_date, lot.lot_id))]
+    )
+    calc_df = pl.DataFrame(calc_rows)
+    basis_adjustments_df = pl.DataFrame(adjustment_rows)
+    sales_df = simulate_sales(full_lots, sale_rows, fx_table)
+
+    output_dir = Path(output_dir)
+    ledger_path = output_dir / "ibkr_reit_working_ledger.csv"
+    calc_path = output_dir / f"ibkr_reit_{tax_year}_calc.csv"
+    basis_path = output_dir / f"ibkr_reit_{tax_year}_basis_adjustments.csv"
+    sales_path = output_dir / "ibkr_reit_exit_sales.csv"
+    summary_path = output_dir / "ibkr_reit_exit_summary.md"
+
+    write_csv(working_ledger_df, ledger_path)
+    write_csv(calc_df, calc_path)
+    write_csv(basis_adjustments_df, basis_path)
+    write_csv(sales_df, sales_path)
+    write_summary(summary_path, working_ledger_df, calc_df, sales_df, tax_year, source_label="IBKR REIT Non-Reporting Funds")
 
     return {
         "working_ledger": ledger_path,

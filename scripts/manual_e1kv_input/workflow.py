@@ -35,20 +35,12 @@ class CoreInputs:
     trade_profit: Decimal = Decimal("0")
     trade_loss: Decimal = Decimal("0")
     fund_distributions: Decimal = Decimal("0")
+    reit_distributions: Decimal = Decimal("0")
     creditable_foreign_tax: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
 class ReportingFundsInputs:
-    fund_distributions: Decimal = Decimal("0")
-    deemed_distributed_income: Decimal = Decimal("0")
-    domestic_dividends_kz189: Decimal = Decimal("0")
-    domestic_dividend_kest_kz899: Decimal = Decimal("0")
-    creditable_foreign_tax: Decimal = Decimal("0")
-
-
-@dataclass(frozen=True)
-class NonReportingFundsInputs:
     fund_distributions: Decimal = Decimal("0")
     deemed_distributed_income: Decimal = Decimal("0")
     domestic_dividends_kz189: Decimal = Decimal("0")
@@ -76,7 +68,8 @@ def build_e1kv_computation(
     *,
     core: CoreInputs,
     reporting_funds: ReportingFundsInputs,
-    non_reporting_funds: NonReportingFundsInputs,
+    non_reporting_etf_age: Decimal = Decimal("0"),
+    non_reporting_reit_age: Decimal = Decimal("0"),
 ) -> E1kvComputation:
     normalized_trade_loss = -abs(core.trade_loss)
 
@@ -84,21 +77,20 @@ def build_e1kv_computation(
     trade_profit_total = core.trade_profit
     trade_loss_total = normalized_trade_loss
     fund_distributions_total = (
-        core.fund_distributions + reporting_funds.fund_distributions + non_reporting_funds.fund_distributions
+        core.fund_distributions
+        + core.reit_distributions
+        + reporting_funds.fund_distributions
     )
     deemed_distributed_income_total = (
-        reporting_funds.deemed_distributed_income + non_reporting_funds.deemed_distributed_income
+        reporting_funds.deemed_distributed_income
+        + non_reporting_etf_age
+        + non_reporting_reit_age
     )
-    domestic_dividends_kz189_total = (
-        reporting_funds.domestic_dividends_kz189 + non_reporting_funds.domestic_dividends_kz189
-    )
-    domestic_dividend_kest_kz899_total = (
-        reporting_funds.domestic_dividend_kest_kz899 + non_reporting_funds.domestic_dividend_kest_kz899
-    )
+    domestic_dividends_kz189_total = reporting_funds.domestic_dividends_kz189
+    domestic_dividend_kest_kz899_total = reporting_funds.domestic_dividend_kest_kz899
     creditable_foreign_tax_source_sum = (
         core.creditable_foreign_tax
         + reporting_funds.creditable_foreign_tax
-        + non_reporting_funds.creditable_foreign_tax
     )
 
     positive_total = (
@@ -133,7 +125,8 @@ def render_output_markdown(
     tax_year: int,
     core: CoreInputs,
     reporting_funds: ReportingFundsInputs,
-    non_reporting_funds: NonReportingFundsInputs,
+    non_reporting_etf_age: Decimal = Decimal("0"),
+    non_reporting_reit_age: Decimal = Decimal("0"),
     result: E1kvComputation,
 ) -> str:
     return (
@@ -146,25 +139,21 @@ def render_output_markdown(
         f"Verluste = {format_display_amount(result.trade_loss_total)}\n\n\n"
         "##### Einkünfte aus Investmentfonds und Immobilieninvestmentfonds\n"
         f"Ausschüttungen 27,5% = {format_formula_amount(core.fund_distributions)} + "
-        f"{format_formula_amount(reporting_funds.fund_distributions)} + "
-        f"{format_formula_amount(non_reporting_funds.fund_distributions)} = "
+        f"{format_formula_amount(core.reit_distributions)} + "
+        f"{format_formula_amount(reporting_funds.fund_distributions)} = "
         f"{format_display_amount(result.fund_distributions_total)}\n"
         f"Ausschüttungsgleiche Erträge 27,5% = {format_formula_amount(reporting_funds.deemed_distributed_income)} + "
-        f"{format_formula_amount(non_reporting_funds.deemed_distributed_income)} = "
+        f"{format_formula_amount(non_reporting_etf_age)} + "
+        f"{format_formula_amount(non_reporting_reit_age)} = "
         f"{format_display_amount(result.deemed_distributed_income_total)}\n"
         f"Inländische Dividenden im Verlustausgleich (KZ 189) = "
-        f"{format_formula_amount(reporting_funds.domestic_dividends_kz189)} + "
-        f"{format_formula_amount(non_reporting_funds.domestic_dividends_kz189)} = "
         f"{format_display_amount(result.domestic_dividends_kz189_total)}\n"
         f"KESt auf inländische Dividenden (KZ 899) = "
-        f"{format_formula_amount(reporting_funds.domestic_dividend_kest_kz899)} + "
-        f"{format_formula_amount(non_reporting_funds.domestic_dividend_kest_kz899)} = "
         f"{format_display_amount(result.domestic_dividend_kest_kz899_total)}\n\n"
         "#### Anzurechnende ausländische\n"
         "(Quellen) Steuer auf Einkünfte, die dem besonderen Steuersatz von 27,5% unterliegen = "
         f"min({format_formula_amount(core.creditable_foreign_tax)} + "
-        f"{format_formula_amount(reporting_funds.creditable_foreign_tax)} + "
-        f"{format_formula_amount(non_reporting_funds.creditable_foreign_tax)}, "
+        f"{format_formula_amount(reporting_funds.creditable_foreign_tax)}, "
         f"{format_formula_amount(result.foreign_tax_ceiling)}) = "
         f"{format_display_amount(result.final_creditable_foreign_tax)}\n\n"
         "## Formula Notes\n"

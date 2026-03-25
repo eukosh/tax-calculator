@@ -2,7 +2,12 @@
 
 This page documents the non-reporting-funds exit workflow artifacts and the important manual inputs that drive them.
 
-Current workflow scope is the standalone Freedom-funds exit process described in [`scripts/non_reporting_funds_exit/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/non_reporting_funds_exit/README.md).
+Current workflow scope covers two sources:
+
+- **Freedom ETFs** (`--source freedom`): `SCHD.US`, `TLT.US`
+- **IBKR REITs** (`--source ibkr`): `CHCT`, `CTRE`, `MPW`, `O`
+
+See [`scripts/non_reporting_funds_exit/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/non_reporting_funds_exit/README.md) for usage.
 
 ## File Inventory
 
@@ -10,11 +15,11 @@ Current workflow scope is the standalone Freedom-funds exit process described in
 | --- | --- | --- | --- |
 | `data/input/non_reporting_funds_exit/non_reporting_funds_<year>_prices.csv` | Input | Manual annual price source for deemed-income calculation | one ticker-year input |
 | `data/input/<person>/<year>/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv` | Input | Optional sale plan for later exit simulation | one planned sale |
-| `data/output/<person>/non_reporting_funds_exit/non_reporting_funds_working_ledger.csv` | State output | End-of-run lot ledger after deemed-income step-up allocation and optional simulated sales | one fund lot |
-| `data/output/<person>/non_reporting_funds_exit/non_reporting_funds_<year>_calc.csv` | Output | Annual deemed-income calculation per target fund | one ticker-year result |
-| `data/output/<person>/non_reporting_funds_exit/non_reporting_funds_<year>_basis_adjustments.csv` | Output | Lot-level allocation of the annual deemed-income step-up | one lot-adjustment row |
-| `data/output/<person>/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv` | Output | Later sale simulation output | one consumed lot slice per sale |
-| `data/output/<person>/non_reporting_funds_exit/non_reporting_funds_exit_summary.md` | Output | Human-readable summary of calc, ledger, and sale results | one markdown report |
+| `data/output/<person>/non_reporting_funds_exit/<source>/*_working_ledger.csv` | State output | End-of-run lot ledger after deemed-income step-up allocation and optional simulated sales | one fund lot |
+| `data/output/<person>/non_reporting_funds_exit/<source>/*_<year>_calc.csv` | Output | Annual deemed-income calculation per target fund | one ticker-year result |
+| `data/output/<person>/non_reporting_funds_exit/<source>/*_<year>_basis_adjustments.csv` | Output | Lot-level allocation of the annual deemed-income step-up | one lot-adjustment row |
+| `data/output/<person>/non_reporting_funds_exit/<source>/*_exit_sales.csv` | Output | Later sale simulation output | one consumed lot slice per sale |
+| `data/output/<person>/non_reporting_funds_exit/<source>/*_exit_summary.md` | Output | Human-readable summary of calc, ledger, and sale results | one markdown report |
 
 ## Important Inputs
 

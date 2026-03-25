@@ -16,7 +16,7 @@ Ask yourself these three questions:
 
 1. Did you receive dividends or do any stock/ADR/REIT trades in IBKR?
 2. Did you hold EU-domiciled reporting-fund ETFs?
-3. Did you hold non-reporting funds like `SCHD.US` or `TLT.US` in Freedom?
+3. Did you hold non-reporting funds (`SCHD.US`/`TLT.US` in Freedom, or US REITs in IBKR)?
 
 If the answer is `no` to a section, skip that section.
 
@@ -299,24 +299,24 @@ Important:
 
 ## Part 3: Non-Reporting Funds
 
-Use this only for non-reporting funds, currently the narrow Freedom workflow such as:
+Use this for non-reporting funds (Nicht-Meldefonds):
 
-- `SCHD.US`
-- `TLT.US`
+- **Freedom ETFs**: `SCHD.US`, `TLT.US`
+- **IBKR REITs**: `CHCT`, `CTRE`, `MPW`, `O`
 
 ### Step 1: Prepare the input files
 
-You need:
+For Freedom ETFs you need:
 
-- the full Freedom lifetime statement JSON
-- the annual price input CSV
-- optionally a sale-plan CSV if you want to simulate a sale
+- the full Freedom lifetime statement JSON under `data/input/<person>/<year>/non_reporting_funds_exit/`
+- the annual price input CSV in `data/input/non_reporting_funds_exit/non_reporting_funds_<year>_prices.csv`
+- optionally a sale-plan CSV
 
-Files:
+For IBKR REITs you need:
 
-- statement JSON under `data/input/<person>/<year>/non_reporting_funds_exit/`
-- annual prices in `data/input/non_reporting_funds_exit/non_reporting_funds_<year>_prices.csv`
-- optional sale plan in `data/input/<person>/<year>/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv`
+- the Austrian opening-state CSV (`data/input/<person>/ibkr/austrian_opening_state_2024-05-01.csv`)
+- IBKR trade-history XML files (`data/input/<person>/ibkr/trades/`)
+- the same annual price input CSV (REIT rows are already included)
 
 ### Step 2: Fill the annual price CSV
 
@@ -324,54 +324,37 @@ Open:
 
 - `data/input/non_reporting_funds_exit/non_reporting_funds_<year>_prices.csv`
 
-Replace the placeholder prices with the actual prices you want to rely on for filing.
-
-If these prices are wrong, the result is wrong.
+Replace the placeholder prices with the actual prices you want to rely on for filing. Both Freedom ETF and IBKR REIT rows are in the same file.
 
 ### Step 3: Run the workflow
 
-Basic run:
+Freedom ETFs:
 
 ```bash
-poetry run python -m scripts.non_reporting_funds_exit.cli
+poetry run python -m scripts.non_reporting_funds_exit.cli --person eugene --source freedom
 ```
 
-Explicit-path example:
+IBKR REITs:
 
 ```bash
-poetry run python -m scripts.non_reporting_funds_exit.cli \
-  --person eugene \
-  --statement-path "data/input/eugene/2025/non_reporting_funds_exit/freedom_2024-03-26 23_59_59_2026-03-17 23_59_59_all.json" \
-  --price-input-path "data/input/non_reporting_funds_exit/non_reporting_funds_2025_prices.csv" \
-  --sale-plan-path "data/input/eugene/2025/non_reporting_funds_exit/non_reporting_funds_exit_sales.csv" \
-  --output-dir "data/output/eugene/non_reporting_funds_exit"
+poetry run python -m scripts.non_reporting_funds_exit.cli --person eugene --source ibkr
 ```
 
 ### Step 4: Review the important output files
 
 Look under:
 
-- `data/output/<person>/non_reporting_funds_exit/`
+- `data/output/<person>/non_reporting_funds_exit/freedom/` for Freedom ETFs
+- `data/output/<person>/non_reporting_funds_exit/ibkr/` for IBKR REITs
 
-Important files:
-
-- `non_reporting_funds_2025_calc.csv`
-  Main deemed-income result for the year.
-- `non_reporting_funds_2025_basis_adjustments.csv`
-  Shows how the deemed-income step-up was attached to lots.
-- `non_reporting_funds_working_ledger.csv`
-  Shows the adjusted lot ledger after the annual step-up.
-- `non_reporting_funds_exit_sales.csv`
-  Only relevant if you supplied a sale plan.
-- `non_reporting_funds_exit_summary.md`
-  Simple human-readable summary.
+Each contains the same kind of artifacts: `*_calc.csv`, `*_basis_adjustments.csv`, `*_working_ledger.csv`, `*_exit_sales.csv`, and `*_exit_summary.md`.
 
 ### Step 5: What do I enter in the tax return?
 
 For the non-reporting-fund deemed-income amount:
 
-- take the `deemed_amount_eur` total from `non_reporting_funds_<year>_calc.csv`
-- enter that amount in `E1kv` under Kennzahl `937`
+- sum the `deemed_amount_eur` totals from both Freedom and IBKR calc CSVs
+- enter that combined amount in `E1kv` under Kennzahl `937`
 
 Important:
 
@@ -381,7 +364,7 @@ Important:
 Also remember:
 
 - actual fund cash distributions on a foreign depot belong separately in Kennzahl `898`
-- this workflow does not calculate those distributions
+- this workflow does not calculate those distributions; they are handled by the core app
 
 ## Very Short Version
 
@@ -394,7 +377,8 @@ If you want the shortest possible checklist:
 5. Run:
    - `poetry run python main.py`
    - `poetry run python -m scripts.reporting_funds.cli ...` if you have reporting-fund ETFs
-   - `poetry run python -m scripts.non_reporting_funds_exit.cli ...` if you have non-reporting funds
+   - `poetry run python -m scripts.non_reporting_funds_exit.cli --source freedom ...` if you have Freedom non-reporting ETFs
+   - `poetry run python -m scripts.non_reporting_funds_exit.cli --source ibkr ...` if you have IBKR REITs
 6. Review:
    - core IBKR outputs under `data/output/<person>/tax_report_.../artifacts/ibkr/`
    - ETF outputs under `data/output/<person>/reporting_funds/`

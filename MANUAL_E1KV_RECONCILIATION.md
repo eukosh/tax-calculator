@@ -29,7 +29,8 @@ For a given filing year, collect:
 
 - the core app PDF report
 - the reporting-funds yearly summary
-- the non-reporting-funds summary, if used
+- the non-reporting-funds ETF summary, if used
+- the non-reporting-funds REIT summary, if used
 
 For foreign-tax-credit support, also keep:
 
@@ -39,7 +40,8 @@ Example for 2025:
 
 - `data/output/eugene/tax_report_eugene_2025-01-01_2025-12-31/tax_report_eugene_2025-01-01_2025-12-31.pdf`
 - `data/output/eugene/reporting_funds/2025/reporting_funds_2025_summary.md`
-- `data/output/eugene/non_reporting_funds_exit/non_reporting_funds_exit_summary.md`
+- `data/output/eugene/non_reporting_funds_exit/freedom/non_reporting_funds_exit_summary.md`
+- `data/output/eugene/non_reporting_funds_exit/ibkr/ibkr_reit_exit_summary.md`
 - `data/output/eugene/tax_report_eugene_2025-01-01_2025-12-31/artifacts/finanzonline/finanzonline_buckets__2025-01-01_2025-12-31.csv`
 
 ## Core Rule
@@ -62,6 +64,7 @@ Take these filing fields from the source workflows:
 - trade profits 27.5%
 - trade losses
 - ETF distributions 27.5%
+- REIT distributions 27.5%
 - deemed distributed income 27.5%
 - domestic dividends in loss offset (`KZ 189`)
 - Austrian KESt on domestic dividends (`KZ 899`)
@@ -69,9 +72,10 @@ Take these filing fields from the source workflows:
 
 Keep these rules:
 
-- `KZ 189` stays separate from ETF distributions and AGE
+- `KZ 189` and `KZ 899` come only from reporting funds
 - `KZ 899` stays separate from foreign-tax credit
 - `10289` basis corrections are not entered separately in E1kv
+- non-reporting funds only contribute AGE; their distributions are handled by the core app
 - use `0` for any source field that a workflow does not produce
 
 ## Reconciliation Steps
@@ -132,43 +136,43 @@ From reporting funds:
 - Austrian KESt on domestic dividends (`KZ 899`): `0.000000`
 - creditable foreign tax: `6.016800`
 
-From non-reporting funds:
+From non-reporting funds (ETFs):
 
-- ETF distributions: `0.0`
 - AGE: `1089.5114`
-- domestic dividends (`KZ 189`): `0.0`
-- Austrian KESt on domestic dividends (`KZ 899`): `0.0`
-- creditable foreign tax: `0.0`
+
+From non-reporting funds (REITs):
+
+- AGE: `300.4264`
 
 ### Example Totals
 
 - ordinary capital income = `840.1220`
 - trade profit = `15.4604`
 - trade loss = `-1350.8942`
-- ETF distributions = `291.7672 + 21.453814 + 0 = 313.221014`
-- AGE = `62.424798 + 1089.5114 = 1151.936198`
+- ETF/REIT distributions = `291.7672 + 0 + 21.453814 = 313.221014`
+- AGE = `62.424798 + 1089.5114 + 300.4264 = 1452.362598`
 - domestic dividends (`KZ 189`) = `0`
 - Austrian KESt on domestic dividends (`KZ 899`) = `0`
 
 Positive total:
 
-- `840.1220 + 15.4604 + 313.221014 + 1151.936198 + 0 = 2320.739612`
+- `840.1220 + 15.4604 + 313.221014 + 1452.362598 + 0 = 2621.166012`
 
 Post-loss base:
 
-- `2320.739612 - 1350.8942 = 969.845412`
+- `2621.166012 - 1350.8942 = 1270.271812`
 
 Foreign-tax ceiling:
 
-- `969.845412 * 0.275 = 266.7075`
+- `1270.271812 * 0.275 = 349.3247`
 
 Source-level creditable foreign tax:
 
-- `121.9311 + 6.0168 + 0 = 127.9479`
+- `121.9311 + 6.0168 = 127.9479`
 
 Final usable foreign-tax credit:
 
-- `min(127.9479, 266.7075) = 127.9479`
+- `min(127.9479, 349.3247) = 127.9479`
 
 ### Example Filing Note
 
@@ -183,13 +187,13 @@ Verluste = -1350.89
 
 
 ##### Einkünfte aus Investmentfonds und Immobilieninvestmentfonds
-Ausschüttungen 27,5% = 291.7672 + 21.453814 + 0 = 313.22
-Ausschüttungsgleiche Erträge 27,5% = 62.424798 + 1089.5114 = 1151.94
-Inländische Dividenden im Verlustausgleich (KZ 189) = 0 + 0 = 0.00
-KESt auf inländische Dividenden (KZ 899) = 0 + 0 = 0.00
+Ausschüttungen 27,5% = 291.7672 + 0 + 21.453814 = 313.22
+Ausschüttungsgleiche Erträge 27,5% = 62.424798 + 1089.5114 + 300.4264 = 1452.36
+Inländische Dividenden im Verlustausgleich (KZ 189) = 0.00
+KESt auf inländische Dividenden (KZ 899) = 0.00
 
 #### Anzurechnende ausländische
-(Quellen) Steuer auf Einkünfte, die dem besonderen Steuersatz von 27,5% unterliegen = min(121.9311 + 6.016800 + 0, 266.7075) = 127.95
+(Quellen) Steuer auf Einkünfte, die dem besonderen Steuersatz von 27,5% unterliegen = min(121.9311 + 6.016800, 349.3247) = 127.95
 ```
 
 ## Audit Support
