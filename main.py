@@ -108,6 +108,12 @@ if __name__ == "__main__":
     ibkr_calculate_trade_profit_loss_separately = True
     freedom_calculate_trade_profit_loss_separately = True
     include_freedom_trades = False
+    # TODO 2026+: REIT trades must be excluded from regular trade processing.
+    # For 2025 REIT sales are treated as stocks (no AgE was paid in 2024).
+    # From 2026 onwards REIT trades are handled via non-reporting funds (Nicht-Meldefonds).
+    ibkr_excluded_trade_subcategories: set[str] = {"ETF"}
+    if reporting_start_date.year >= 2026:
+        ibkr_excluded_trade_subcategories.add("REIT")
 
     logging.info(f"Reporting dates: {reporting_start_date} - {reporting_end_date}")
 
@@ -149,7 +155,7 @@ if __name__ == "__main__":
         start_date=reporting_start_date,
         end_date=reporting_end_date,
         separate_trade_profit_loss=ibkr_calculate_trade_profit_loss_separately,
-        excluded_trade_subcategories={"ETF"},
+        excluded_trade_subcategories=ibkr_excluded_trade_subcategories,
         austrian_opening_state_path=austrian_opening_state_path,
         ibkr_trade_history_path=ibkr_trade_history_path,
         authoritative_start_date=authoritative_start_date,

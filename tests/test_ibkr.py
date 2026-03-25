@@ -1088,6 +1088,68 @@ def test_core_ibkr_excludes_etfs_from_trades_cash_and_finanzonline_buckets(tmp_p
     assert stock_position_events_df is not None
 
 
+def test_core_ibkr_excludes_reits_from_trades(tmp_path):
+    trade_history_path = tmp_path / "history.xml"
+    _write_trade_history_xml(
+        trade_history_path,
+        [
+            _trade_confirm_row(
+                ticker="SPY5", isin="IE00B6YX5C33", sub_category="ETF",
+                trade_date="2024-01-02", date_time="2024-01-02 10:00:00",
+                operation="BUY", quantity="1", price="100", trade_id="etf-buy",
+            ),
+            _trade_confirm_row(
+                ticker="SPY5", isin="IE00B6YX5C33", sub_category="ETF",
+                trade_date="2024-06-03", date_time="2024-06-03 10:00:00",
+                operation="SELL", quantity="-1", price="120", trade_id="etf-sell",
+            ),
+            _trade_confirm_row(
+                ticker="O", isin="US7561091049", sub_category="REIT",
+                trade_date="2024-01-02", date_time="2024-01-02 11:00:00",
+                operation="BUY", quantity="2", price="50", trade_id="reit-buy",
+            ),
+            _trade_confirm_row(
+                ticker="O", isin="US7561091049", sub_category="REIT",
+                trade_date="2024-06-03", date_time="2024-06-03 11:00:00",
+                operation="SELL", quantity="-2", price="60", trade_id="reit-sell",
+            ),
+            _trade_confirm_row(
+                ticker="AAPL", isin="US0378331005", sub_category="COMMON",
+                trade_date="2024-01-02", date_time="2024-01-02 12:00:00",
+                operation="BUY", quantity="1", price="200", trade_id="aapl-buy",
+            ),
+            _trade_confirm_row(
+                ticker="AAPL", isin="US0378331005", sub_category="COMMON",
+                trade_date="2024-06-03", date_time="2024-06-03 12:00:00",
+                operation="SELL", quantity="-1", price="230", trade_id="aapl-sell",
+            ),
+        ],
+    )
+
+    rates_df = pl.DataFrame(
+        {
+            Column.rate_date: [date(2024, 1, 2), date(2024, 6, 3)],
+            Column.currency: ["USD", "USD"],
+            Column.exchange_rate: [1.0, 1.0],
+        }
+    )
+
+    detail_df, summary_df, stock_position_state_df, _ = process_trades_ibkr(
+        exchange_rates_df=rates_df,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        excluded_trade_subcategories={"ETF", "REIT"},
+        ibkr_trade_history_path=str(trade_history_path),
+    )
+
+    assert detail_df is not None
+    assert detail_df["ticker"].to_list() == ["AAPL"]
+    assert summary_df is not None
+    assert summary_df["profit_euro_total"].to_list() == [30.0]
+    assert stock_position_state_df is not None
+    assert stock_position_state_df["ticker"].to_list() == ["AAPL"]
+
+
 def test_process_cash_transactions_ibkr_dedupes_overlapping_xml_inputs(tmp_path):
     xml_content = """\
 <FlexQueryResponse>
