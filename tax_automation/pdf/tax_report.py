@@ -9,7 +9,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer, Table
 
-from src.const import Column, get_column_repr
+from tax_automation.const import Column, get_column_repr
 
 styles = getSampleStyleSheet()
 FINANZONLINE_NOTES = [

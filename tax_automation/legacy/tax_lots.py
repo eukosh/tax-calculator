@@ -12,7 +12,7 @@ from typing import Iterable
 
 import polars as pl
 
-from src.broker_history import RawBrokerTrade, round_money, round_qty
+from tax_automation.broker_history import RawBrokerTrade, round_money, round_qty
 
 
 def _append_unique_note_text(existing: str, incoming: str) -> str:

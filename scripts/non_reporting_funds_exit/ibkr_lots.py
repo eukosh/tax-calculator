@@ -7,7 +7,7 @@ from pathlib import Path
 
 from scripts.non_reporting_funds_exit.freedom_lots import NormalizedTrade
 from scripts.non_reporting_funds_exit.workflow import Lot, round_money, round_qty
-from src.broker_history import load_ibkr_stock_like_trades
+from tax_automation.broker_history import load_ibkr_stock_like_trades
 
 IBKR_REIT_TICKERS = ("CHCT", "CTRE", "MPW", "O")
 

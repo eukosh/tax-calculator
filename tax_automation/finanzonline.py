@@ -4,9 +4,9 @@ from typing import Any
 
 import polars as pl
 
-from src.const import FLOAT_PRECISION, KEST_RATE
-from src.const import Column as Col
-from src.precision import cast_decimal_columns_to_float, to_decimal, to_output_float
+from tax_automation.const import FLOAT_PRECISION, KEST_RATE
+from tax_automation.const import Column as Col
+from tax_automation.precision import cast_decimal_columns_to_float, to_decimal, to_output_float
 
 INPUT_LABEL_COL = "Field"
 ESTIMATE_LABEL_COL = "Metric"

@@ -4,9 +4,9 @@ import polars as pl
 import pytest
 from polars.testing.asserts import assert_frame_equal
 
-from src.const import Column
-from src.precision import cast_decimal_columns_to_float
-from src.utils import calculate_kest, convert_to_euro, extract_elements, join_exchange_rates, read_xml_to_df
+from tax_automation.const import Column
+from tax_automation.precision import cast_decimal_columns_to_float
+from tax_automation.utils import calculate_kest, convert_to_euro, extract_elements, join_exchange_rates, read_xml_to_df
 
 dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 6), date(2024, 1, 10), date(2024, 1, 10)]
 dividend_currencies = ["USD", "USD", "USD", "GBP", "EUR"]

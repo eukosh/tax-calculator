@@ -25,9 +25,9 @@ from scripts.reporting_funds.models import (
     round_qty,
 )
 from scripts.reporting_funds.oekb_csv import load_matching_oekb_reports, load_required_oekb_reports
-from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
-from src.currencies import ExchangeRates
-from src.moving_average import (
+from tax_automation.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
+from tax_automation.currencies import ExchangeRates
+from tax_automation.moving_average import (
     EVENT_TYPE_AUSTRIAN_BASIS_RESET,
     PositionState,
     aggregate_state_rows,
@@ -42,7 +42,7 @@ from src.moving_average import (
     position_states_to_df,
     replay_events,
 )
-from src.precision import cast_decimal_columns_to_float, quantize_fx, quantize_money, quantize_qty, to_decimal, to_output_float
+from tax_automation.precision import cast_decimal_columns_to_float, quantize_fx, quantize_money, quantize_qty, to_decimal, to_output_float
 
 NEGATIVE_DEEMED_DISTRIBUTION_IGNORE = "ignore"
 NEGATIVE_DEEMED_DISTRIBUTION_APPLY_FULL = "apply_full"

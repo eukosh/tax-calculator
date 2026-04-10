@@ -1,8 +1,8 @@
 import polars as pl
 from polars.testing.asserts import assert_frame_equal
 
-from src.const import Column
-from src.finanzonline import (
+from tax_automation.const import Column
+from tax_automation.finanzonline import (
     AMOUNT_EUR_COL,
     BUCKET_AMOUNT_EUR_COL,
     BUCKET_CATEGORY_COL,

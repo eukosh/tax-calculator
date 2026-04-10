@@ -8,8 +8,8 @@ from typing import Iterable
 
 import polars as pl
 
-from src.broker_history import round_money, round_qty
-from src.precision import to_decimal, to_output_float
+from tax_automation.broker_history import round_money, round_qty
+from tax_automation.precision import to_decimal, to_output_float
 
 EVENT_TYPE_AUSTRIAN_BASIS_RESET = "austrian_basis_reset"
 EVENT_TYPE_BUY = "buy"

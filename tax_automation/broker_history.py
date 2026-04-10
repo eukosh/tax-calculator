@@ -9,9 +9,9 @@ from typing import Iterable
 import lxml.etree as etree
 import polars as pl
 
-from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
-from src.precision import quantize_fx, quantize_money, quantize_qty, to_decimal
-from src.utils import resolve_input_file_paths
+from tax_automation.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
+from tax_automation.precision import quantize_fx, quantize_money, quantize_qty, to_decimal
+from tax_automation.utils import resolve_input_file_paths
 
 MONEY_DIGITS = 6
 QTY_DIGITS = 8

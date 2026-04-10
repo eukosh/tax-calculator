@@ -3,9 +3,9 @@ from datetime import date
 
 import polars as pl
 
-from src.const import FLOAT_PRECISION, Column
-from src.precision import PL_MONEY_DTYPE, cast_decimal_columns_to_float, decimal_lit
-from src.utils import calculate_kest, convert_to_euro, join_exchange_rates, read_csv_to_df
+from tax_automation.const import FLOAT_PRECISION, Column
+from tax_automation.precision import PL_MONEY_DTYPE, cast_decimal_columns_to_float, decimal_lit
+from tax_automation.utils import calculate_kest, convert_to_euro, join_exchange_rates, read_csv_to_df
 
 
 def process_wise_statement(

@@ -5,7 +5,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from scripts.reporting_funds.models import OekbReport, round_money
-from src.precision import quantize_qty
+from tax_automation.precision import quantize_qty
 
 REQUIRED_METADATA_LABELS = (
     "ISIN",

@@ -9,8 +9,8 @@ from typing import Sequence
 import polars as pl
 import requests
 
-from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
-from src.precision import PL_FX_DTYPE, quantize_fx
+from tax_automation.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
+from tax_automation.precision import PL_FX_DTYPE, quantize_fx
 
 
 class ExchangeRatesCacheError(ValueError):

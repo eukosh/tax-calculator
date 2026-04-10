@@ -10,8 +10,8 @@ import polars as pl
 
 from scripts.reporting_funds.models import IbkrTrade, round_money, round_qty
 from scripts.reporting_funds.workflow import build_fx_table, get_fx_rate
-from src.moving_average import build_buy_event, build_sell_event, replay_events
-from src.broker_history import RawBrokerTrade, load_ibkr_stock_like_trades
+from tax_automation.moving_average import build_buy_event, build_sell_event, replay_events
+from tax_automation.broker_history import RawBrokerTrade, load_ibkr_stock_like_trades
 
 RAW_IBKR_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 SUPPORTED_ASSET_CLASSES = {"ETF", "COMMON", "REIT", "ADR"}

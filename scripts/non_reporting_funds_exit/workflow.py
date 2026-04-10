@@ -10,8 +10,8 @@ from pathlib import Path
 import polars as pl
 
 from scripts.non_reporting_funds_exit.freedom_lots import TARGET_TICKERS, load_split_events, load_target_trades
-from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
-from src.currencies import ExchangeRates, ExchangeRatesCacheError
+from tax_automation.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET
+from tax_automation.currencies import ExchangeRates, ExchangeRatesCacheError
 
 MONEY_DIGITS = 6
 QTY_DIGITS = 8

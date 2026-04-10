@@ -5,8 +5,8 @@ import polars as pl
 import pytest
 from polars.testing.asserts import assert_frame_equal
 
-from src.const import Column
-from src.providers.ibkr import (
+from tax_automation.const import Column
+from tax_automation.providers.ibkr import (
     IbkrSummarySection,
     apply_pivot,
     build_finanzonline_dividend_buckets_ibkr,

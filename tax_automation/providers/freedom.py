@@ -4,10 +4,10 @@ from pathlib import Path
 
 import polars as pl
 
-from src.const import FLOAT_PRECISION, CurrencyCode
-from src.const import Column as Col
-from src.const import CorporateActionTypesFF
-from src.finanzonline import (
+from tax_automation.const import FLOAT_PRECISION, CurrencyCode
+from tax_automation.const import Column as Col
+from tax_automation.const import CorporateActionTypesFF
+from tax_automation.finanzonline import (
     BUCKET_AMOUNT_EUR_COL,
     BUCKET_CATEGORY_COL,
     BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL,
@@ -19,8 +19,8 @@ from src.finanzonline import (
     ORDINARY_INCOME_BUCKET_CATEGORY,
     empty_finanzonline_bucket_df,
 )
-from src.precision import cast_decimal_columns_to_float
-from src.utils import build_separate_trade_profit_loss_rows, calculate_kest, convert_to_euro, join_exchange_rates, read_json
+from tax_automation.precision import cast_decimal_columns_to_float
+from tax_automation.utils import build_separate_trade_profit_loss_rows, calculate_kest, convert_to_euro, join_exchange_rates, read_json
 
 EMPTY_VALUE = "-"
 EX_DATE_COL = "ex_date"

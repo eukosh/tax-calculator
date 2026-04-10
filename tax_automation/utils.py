@@ -8,7 +8,7 @@ from typing import Callable, Sequence, TypeGuard, Union
 import lxml.etree as etree
 import polars as pl
 
-from src.const import (
+from tax_automation.const import (
     EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET,
     FLOAT_PRECISION,
     KEST_RATE,
@@ -16,7 +16,7 @@ from src.const import (
     Column,
     CurrencyCode,
 )
-from src.precision import PL_FX_DTYPE, PL_MONEY_DTYPE, cast_decimal_columns_to_float, decimal_lit, money_lit
+from tax_automation.precision import PL_FX_DTYPE, PL_MONEY_DTYPE, cast_decimal_columns_to_float, decimal_lit, money_lit
 
 
 def has_rows(df: pl.DataFrame | None) -> TypeGuard[pl.DataFrame]:

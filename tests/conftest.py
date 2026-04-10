@@ -1,6 +1,6 @@
 import pytest
 
-from src.currencies import ExchangeRates
+from tax_automation.currencies import ExchangeRates
 
 
 @pytest.fixture(scope="session")

@@ -4,9 +4,9 @@ from typing import Final
 
 import polars as pl
 
-from src.const import FLOAT_PRECISION, Column, CurrencyCode, RevolutColumn, RevolutType
-from src.precision import cast_decimal_columns_to_float
-from src.utils import calculate_kest, convert_to_euro, join_exchange_rates
+from tax_automation.const import FLOAT_PRECISION, Column, CurrencyCode, RevolutColumn, RevolutType
+from tax_automation.precision import cast_decimal_columns_to_float
+from tax_automation.utils import calculate_kest, convert_to_euro, join_exchange_rates
 
 _IGNORED_PREFIXES: Final[tuple[str, ...]] = (
     "BUY",

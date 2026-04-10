@@ -5,10 +5,10 @@ from typing import Literal, Sequence
 
 import polars as pl
 
-from src.broker_history import build_fx_table_from_rates_df, get_fx_rate, load_ibkr_stock_like_trades, round_money, round_qty
-from src.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, FLOAT_PRECISION, CurrencyCode, TransactionTypeIBKR
-from src.const import Column as Col
-from src.finanzonline import (
+from tax_automation.broker_history import build_fx_table_from_rates_df, get_fx_rate, load_ibkr_stock_like_trades, round_money, round_qty
+from tax_automation.const import EXCHANGE_RATE_DATES_ACCEPTABLE_OFFSET, FLOAT_PRECISION, CurrencyCode, TransactionTypeIBKR
+from tax_automation.const import Column as Col
+from tax_automation.finanzonline import (
     BUCKET_AMOUNT_EUR_COL,
     BUCKET_CATEGORY_COL,
     BUCKET_CREDITABLE_FOREIGN_TAX_BEFORE_LOSS_EUR_COL,
@@ -21,7 +21,7 @@ from src.finanzonline import (
     REIT_DISTRIBUTION_BUCKET_CATEGORY,
     empty_finanzonline_bucket_df,
 )
-from src.moving_average import (
+from tax_automation.moving_average import (
     PositionEvent,
     build_basis_reset_event,
     build_buy_event,
@@ -31,8 +31,8 @@ from src.moving_average import (
     position_states_to_df,
     replay_events,
 )
-from src.precision import cast_decimal_columns_to_float
-from src.utils import (
+from tax_automation.precision import cast_decimal_columns_to_float
+from tax_automation.utils import (
     build_separate_trade_profit_loss_rows,
     calculate_kest,
     convert_to_euro,

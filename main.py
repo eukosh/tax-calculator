@@ -5,15 +5,15 @@ from pathlib import Path
 import polars as pl
 from dateutil.relativedelta import relativedelta
 
-from src.currencies import ExchangeRates, ExchangeRatesCacheError
-from src.finanzonline import (
+from tax_automation.currencies import ExchangeRates, ExchangeRatesCacheError
+from tax_automation.finanzonline import (
     build_finanzonline_buckets_from_summary_df,
     build_finanzonline_report,
     empty_finanzonline_bucket_df,
 )
-from src.pdf.tax_report import ReportSection, create_tax_report
-from src.providers.freedom import build_finanzonline_dividend_buckets_freedom, process_freedom_statement
-from src.providers.ibkr import (
+from tax_automation.pdf.tax_report import ReportSection, create_tax_report
+from tax_automation.providers.freedom import build_finanzonline_dividend_buckets_freedom, process_freedom_statement
+from tax_automation.providers.ibkr import (
     AUTHORITATIVE_STOCK_LIKE_SUBCATEGORIES,
     IbkrSummarySection,
     build_finanzonline_dividend_buckets_ibkr,
@@ -22,12 +22,12 @@ from src.providers.ibkr import (
     process_cash_transactions_ibkr,
     process_trades_ibkr,
 )
-from src.providers.revolut import process_revolut_savings_statement
-from src.providers.wise import process_wise_statement
-from src.broker_history import load_ibkr_stock_like_trades
-from src.moving_average import load_position_states
-from src.utils import has_rows
-from src.writer import ReportRunLayout
+from tax_automation.providers.revolut import process_revolut_savings_statement
+from tax_automation.providers.wise import process_wise_statement
+from tax_automation.broker_history import load_ibkr_stock_like_trades
+from tax_automation.moving_average import load_position_states
+from tax_automation.utils import has_rows
+from tax_automation.writer import ReportRunLayout
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -291,7 +291,9 @@ if __name__ == "__main__":
     )
     ibkr_bond_buckets_df = build_finanzonline_buckets_from_summary_df(
         "ibkr_bonds",
-        bonds_tax_country_agg_df.with_columns(pl.lit("bonds").alias("type")) if bonds_tax_country_agg_df is not None else None,
+        bonds_tax_country_agg_df.with_columns(pl.lit("bonds").alias("type"))
+        if bonds_tax_country_agg_df is not None
+        else None,
     )
     ibkr_trade_buckets_df = build_finanzonline_buckets_from_summary_df("ibkr_trades", trades_summary_df)
     revolut_buckets_df = build_finanzonline_buckets_from_summary_df("revolut", revolut_summary_df)

@@ -4,9 +4,9 @@ import polars as pl
 import pytest
 from polars.testing.asserts import assert_frame_equal
 
-from src.const import Column
-from src.currencies import ExchangeRates
-from src.providers.wise import process_wise_statement
+from tax_automation.const import Column
+from tax_automation.currencies import ExchangeRates
+from tax_automation.providers.wise import process_wise_statement
 
 REPORTING_PERIOD_START_DATE = date(2024, 1, 1)
 REPORTING_PERIOD_START_END = date(2024, 12, 31)

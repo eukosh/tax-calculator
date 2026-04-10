@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from datetime import date, datetime
 
-from src.broker_history import round_money, round_qty
-from src.precision import to_output_float
+from tax_automation.broker_history import round_money, round_qty
+from tax_automation.precision import to_output_float
 
 
 def _append_unique_note_text(existing: str, incoming: str) -> str:

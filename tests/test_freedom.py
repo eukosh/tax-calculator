@@ -6,8 +6,8 @@ import polars as pl
 import pytest
 from polars.testing.asserts import assert_frame_equal
 
-from src.const import Column
-from src.providers.freedom import process_freedom_statement
+from tax_automation.const import Column
+from tax_automation.providers.freedom import process_freedom_statement
 
 REPORTING_PERIOD_START_DATE = date(2024, 1, 1)
 REPORTING_PERIOD_END_DATE = date(2024, 12, 31)
