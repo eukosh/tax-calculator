@@ -6,9 +6,9 @@ Python tooling for Austrian tax preparation across multiple brokers and fund-tax
 
 This repo currently has three main tax-calculation surfaces:
 
-- Core app in [`main.py`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/main.py)
-- Reporting-fund ETF workflow in [`scripts/reporting_funds/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/reporting_funds/README.md)
-- Non-reporting-fund exit workflow in [`scripts/non_reporting_funds_exit/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/non_reporting_funds_exit/README.md)
+- Core app in [`main.py`](main.py)
+- Reporting-fund ETF workflow in [`scripts/reporting_funds/README.md`](scripts/reporting_funds/README.md)
+- Non-reporting-fund exit workflow in [`scripts/non_reporting_funds_exit/README.md`](scripts/non_reporting_funds_exit/README.md)
 
 ## What's not implemented yet
 - Freedom finance trades are not on moving average basis, after 2026 tax year probably freedom will be decomissioned.
@@ -48,7 +48,7 @@ When configured:
 Current Eugene case:
 
 - Austrian tax residence started on `2024-05-01`
-- the move-in opening snapshot is built by [`scripts/ibkr_basis_builder/cli.py`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/ibkr_basis_builder/cli.py)
+- the move-in opening snapshot is built by [`scripts/ibkr_basis_builder/cli.py`](scripts/ibkr_basis_builder/cli.py)
 
 Current IBKR artifacts produced by `main.py` include:
 
@@ -62,11 +62,11 @@ Current IBKR artifacts produced by `main.py` include:
 
 ## Core Run Examples
 
-The core app is currently configured directly in [`main.py`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/main.py), not through a standalone CLI.
+The core app is currently configured directly in [`main.py`](main.py), not through a standalone CLI.
 
 Typical copy-edit-run flow:
 
-1. Open [`main.py`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/main.py)
+1. Open [`main.py`](main.py)
 2. Adjust:
    - `person`
    - `ibkr_input_path`
@@ -115,15 +115,15 @@ Rule:
 Workflow docs:
 
 - Core + repo overview: this file
-- Reporting-fund ETFs: [`scripts/reporting_funds/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/reporting_funds/README.md)
-- Non-reporting-fund exit: [`scripts/non_reporting_funds_exit/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/scripts/non_reporting_funds_exit/README.md)
+- Reporting-fund ETFs: [`scripts/reporting_funds/README.md`](scripts/reporting_funds/README.md)
+- Non-reporting-fund exit: [`scripts/non_reporting_funds_exit/README.md`](scripts/non_reporting_funds_exit/README.md)
 
 Schema and artifact glossary:
 
-- Glossary index: [`docs/glossary/README.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/docs/glossary/README.md)
-- Core app glossary: [`docs/glossary/core-app.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/docs/glossary/core-app.md)
-- Reporting-funds glossary: [`docs/glossary/reporting-funds.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/docs/glossary/reporting-funds.md)
-- Non-reporting-funds glossary: [`docs/glossary/non-reporting-funds.md`](/Users/eugene.kosharnyi/Desktop/projects/personal/tax-calculator/docs/glossary/non-reporting-funds.md)
+- Glossary index: [`docs/glossary/README.md`](docs/glossary/README.md)
+- Core app glossary: [`docs/glossary/core-app.md`](docs/glossary/core-app.md)
+- Reporting-funds glossary: [`docs/glossary/reporting-funds.md`](docs/glossary/reporting-funds.md)
+- Non-reporting-funds glossary: [`docs/glossary/non-reporting-funds.md`](docs/glossary/non-reporting-funds.md)
 
 Rule of thumb:
 

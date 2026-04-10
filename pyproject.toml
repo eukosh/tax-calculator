@@ -1,10 +1,10 @@
 [tool.poetry]
 name = "tax-automation"
 version = "0.1.0"
-description = ""
+description = "Python tooling for Austrian tax preparation across multiple brokers and fund-tax workflows."
 authors = ["Eugene K. <eugene.kosharnyi@gmail.com>"]
 readme = "README.md"
-package-mode = false
+packages = [{ include = "tax_automation" }]
 
 [tool.poetry.dependencies]
 python = "^3.13"
@@ -13,6 +13,7 @@ polars = "^1.18.0"
 requests = "^2.32.3"
 reportlab = "^4.2.5"
 matplotlib = "^3.10.0"
+python-dateutil = "^2.9"
 
 
 [tool.poetry.group.dev.dependencies]
